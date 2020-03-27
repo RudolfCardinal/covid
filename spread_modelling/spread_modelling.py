@@ -66,7 +66,7 @@ log = logging.getLogger(__name__)
 # =============================================================================
 
 FuncType = Callable[[Any], Any]
-PROFILE = False
+PROFILE = False  # perform a debugging run with profiling on
 NUMPY_COIN = False  # True is slower
 THIS_DIR = os.path.abspath(os.path.dirname(__file__))
 
@@ -109,7 +109,7 @@ def do_cprofile(func: FuncType) -> FuncType:
     return profiled_func
 
 
-def product_dict(**kwargs) -> Iterable[Dict]:
+def product_dict(**kwargs: Iterable) -> Iterable[Dict]:
     """
     See
     https://stackoverflow.com/questions/5228158/cartesian-product-of-a-dictionary-of-lists.
@@ -117,12 +117,18 @@ def product_dict(**kwargs) -> Iterable[Dict]:
     Takes keyword arguments, and yields dictionaries containing every
     combination of possibilities for each keyword.
     
-    Example:
+    Examples:
     
     .. code-block:: python
     
         >>> list(product_dict(a=[1, 2], b=[3, 4]))
         [{'a': 1, 'b': 3}, {'a': 1, 'b': 4}, {'a': 2, 'b': 3}, {'a': 2, 'b': 4}]
+
+        >>> list(product_dict(a="x", b=range(3)))
+        [{'a': 'x', 'b': 0}, {'a': 'x', 'b': 1}, {'a': 'x', 'b': 2}]
+
+        >>> product_dict(a="x", b=range(3))
+        <generator object product_dict at 0x7fb328070678>
     """  # noqa
     keys = kwargs.keys()
     vals = kwargs.values()
@@ -310,80 +316,61 @@ class Metaconfig(object):
     Creates multiple :class:`Config` objects for systematic variation of
     parameters.
     """
-    VARIABLES = [
-        "home_visits",
-        "clinicians_meet_each_other",
-        "social_infectivity_multiple_if_symptomatic",
-        "p_external_infection_per_day",
-        "iteration",
-    ]
-
-    def __init__(
-            self,
-            n_iterations: int = 50,
-            home_visits: List[bool] = None,
-            clinicians_meet_each_other: List[bool] = None,
-            social_infectivity_multiple_if_symptomatic: List[float] = None,
-            p_external_infection_per_day: List[float] = None) -> None:
+    def __init__(self,
+                 n_iterations: int = 50,
+                 **kwargs: Iterable) -> None:
         """
-        Parameters are lists of possible values for the equivalently named
-        parameters in :class:`Config`, except for ``n_iterations``, the number
-        of runs to perform per condition.
+        Parameters are iterables (e.g. lists) of possible values for the
+        equivalently named parameters in :class:`Config`, except for
+        ``n_iterations``, the number of runs to perform per condition.
         """
         self.n_iterations = n_iterations
-
-        self.poss_home_visits = home_visits or [True, False]
-        self.poss_clinicians_meet_each_other = \
-            clinicians_meet_each_other or [True, False]
-        self.poss_social_infectivity_multiple_if_symptomatic = \
-            social_infectivity_multiple_if_symptomatic or [0.1, 1.0]
-        self.poss_p_external_infection_per_day = \
-            p_external_infection_per_day or [0.0, 0.02]
+        self.kwargs = kwargs
 
     def gen_configs(self) -> Iterable[Config]:
         gen_combinations = product_dict(
-            iteration=list(range(1, self.n_iterations + 1)),
-
-            home_visits=self.poss_home_visits,
-            clinicians_meet_each_other=self.poss_clinicians_meet_each_other,
-            social_infectivity_multiple_if_symptomatic=self.poss_social_infectivity_multiple_if_symptomatic,  # noqa
-            p_external_infection_per_day=self.poss_p_external_infection_per_day,
+            iteration=range(1, self.n_iterations + 1),
+            **self.kwargs
         )
-        for kwargs in gen_combinations:
-            yield Config(**kwargs)
+        for config_kwargs in gen_combinations:
+            yield Config(**config_kwargs)
 
-    @classmethod
-    def announce_sim(cls, config: Config) -> None:
+    def varnames(self) -> List[str]:
+        """
+        Names of variables being manipulated.
+        """
+        return list(self.kwargs.keys())
+
+    def announce_sim(self, config: Config) -> None:
         """
         Announces a simulation, with relevant variables.
         """
-        params = ", ".join(f"{var}={getattr(config, var)}"
-                           for var in cls.VARIABLES)
+        paramlist = [f"{var}={getattr(config, var)}"
+                     for var in self.varnames()]
+        paramlist.append(f"iteration={config.iteration}")
+        params = ", ".join(paramlist)
         log.info(f"Simulating: {params}...")
 
-    @classmethod
-    def csv_header_row(cls) -> List[str]:
+    def csv_header_row(self) -> List[str]:
         """
         Returns a CSV header for the parameters manipulated by this
         metaconfig.
         """
-        return cls.VARIABLES
+        return self.varnames()
 
-    @classmethod
-    def csv_data_row(cls, config: Config) -> List[Any]:
+    def csv_data_row(self, config: Config) -> List[Any]:
         """
         Returns a CSV data row for a specific config generated by this
         metaconfig.
         """
-        return [getattr(config, varname) for varname in cls.VARIABLES]
+        return [getattr(config, varname) for varname in self.varnames()]
 
-    @classmethod
-    def simulate_one(cls, config: Config) -> "Population":
+    def simulate_one(self, config: Config) -> "Population":
         """
         Performs a single run.
         """
         pop = Population(config=config)
-        cls.announce_sim(config)
+        self.announce_sim(config)
         pop.simulate()
         return pop
 
@@ -645,9 +632,6 @@ class Population(object):
         self.prop_day_random_social_contact = config.prop_day_random_social_contact  # noqa
         self.social_infectivity_multiple_if_symptomatic = config.social_infectivity_multiple_if_symptomatic  # noqa
 
-        self.total_n_contacts = 0
-        self.daily_contacts = defaultdict(int)  # type: Dict[int, int]
-
         self.clinicians = [
             Person(name=f"Clinician_{i + 1}", config=config)
             for i in range(self.n_clinicians)
@@ -680,6 +664,15 @@ class Population(object):
         for p in self.gen_people():
             if coin(self.p_baseline_infected):
                 p.infect(0)
+
+        # Logging. Keys are day number.
+        # This is redundancy but important for speed.
+        self.total_n_contacts = 0
+        self.daily_contacts = defaultdict(int)  # type: Dict[int, int]
+        self._n_people_infected_by = defaultdict(int)  # type: Dict[int, int]
+        self._n_clinicians_infected_by = defaultdict(int)  # type: Dict[int, int]  # noqa
+        self._n_patients_infected_by = defaultdict(int)  # type: Dict[int, int]
+        self._n_family_infected_by = defaultdict(int)  # type: Dict[int, int]
 
     def gen_people(self) -> Iterable[Person]:
         """
@@ -782,7 +775,29 @@ class Population(object):
                         continue
                     expose(p1, p2, self.prop_day_random_social_contact)
 
+        self._update_day_totals(today)
         log.debug(f"... day {today} had {self.daily_contacts[today]} contacts")
+
+    def _update_day_totals(self, today: int) -> None:
+        """
+        Faster to calculate this day by day and with a single iteration.
+        """
+        self._n_patients_infected_by[today] = 0
+        self._n_clinicians_infected_by[today] = 0
+        self._n_patients_infected_by[today] = 0
+        self._n_family_infected_by[today] = 0
+        for p in self.clinicians:
+            if p.infected:
+                self._n_people_infected_by[today] += 1
+                self._n_clinicians_infected_by[today] += 1
+        for p in self.patients:
+            if p.infected:
+                self._n_people_infected_by[today] += 1
+                self._n_patients_infected_by[today] += 1
+        for p in self.family:
+            if p.infected:
+                self._n_people_infected_by[today] += 1
+                self._n_family_infected_by[today] += 1
 
     def simulate(self) -> None:
         """
@@ -871,47 +886,38 @@ class Population(object):
         CSV data row for the "people" output.
         """
         for day in range(1, self.n_days + 1):
-            fday = float(day)
             yield [
                 day,
-                self.n_people_infected_by(fday),
-                self.n_clinicians_infected_by(fday),
-                self.n_patients_infected_by(fday),
-                self.n_family_infected_by(fday),
+                self.n_people_infected_by(day),
+                self.n_clinicians_infected_by(day),
+                self.n_patients_infected_by(day),
+                self.n_family_infected_by(day),
                 self.n_contacts_by(day),
             ]
 
-    @staticmethod
-    def _n_infected_by(who: Iterable[Person], when: float) -> int:
+    def n_people_infected_by(self, day: int) -> int:
         """
         Number of people infected by a particular point in time.
         """
-        return sum(1 for p in who
-                   if p.infected and p.infected_at <= when)
+        return self._n_people_infected_by[day]
 
-    def n_people_infected_by(self, when: float) -> int:
-        """
-        Number of people infected by a particular point in time.
-        """
-        return self._n_infected_by(self.gen_people(), when)
-
-    def n_clinicians_infected_by(self, when: float) -> int:
+    def n_clinicians_infected_by(self, day: int) -> int:
         """
         Number of clinicians infected by a particular point in time.
         """
-        return self._n_infected_by(self.clinicians, when)
+        return self._n_clinicians_infected_by[day]
 
-    def n_patients_infected_by(self, when: float) -> int:
+    def n_patients_infected_by(self, day: int) -> int:
         """
         Number of people infected by a particular point in time.
         """
-        return self._n_infected_by(self.patients, when)
+        return self._n_patients_infected_by[day]
 
-    def n_family_infected_by(self, when: float) -> int:
+    def n_family_infected_by(self, day: int) -> int:
         """
         Number of people infected by a particular point in time.
         """
-        return self._n_infected_by(self.family, when)
+        return self._n_family_infected_by[day]
 
     def n_contacts_by(self, last_day: int, first_day: int = 1) -> int:
         """
@@ -929,7 +935,8 @@ class Population(object):
 def simulate_all(filename_totals: str,
                  filename_daily: str,
                  n_iterations: int,
-                 debug: bool = False) -> None:
+                 debug_simple: bool = False,
+                 debug_profile: bool = PROFILE) -> None:
     """
     Simulate our interactions and save the results.
 
@@ -940,19 +947,33 @@ def simulate_all(filename_totals: str,
             output filename for day-by-day details
         n_iterations:
             number of iterations to run
-        debug:
+        debug_simple:
             single iteration, simplified mode
+        debug_profile:
+            several iterations, for profiling
     """
-    if debug:
+    if debug_simple or debug_profile:
         mc = Metaconfig(
+            n_iterations=1 if debug_simple else 24,
             home_visits=[True],
             clinicians_meet_each_other=[True],
             social_infectivity_multiple_if_symptomatic=[0.1],
-            n_iterations=1
+            p_external_infection_per_day=[0.01],
         )
     else:
-        mc = Metaconfig(n_iterations=n_iterations)
+        # ---------------------------------------------------------------------
+        # MAIN SETTINGS
+        # ---------------------------------------------------------------------
+        mc = Metaconfig(
+            n_iterations=n_iterations,
+            home_visits=[True, False],
+            clinicians_meet_each_other=[True, False],
+            social_infectivity_multiple_if_symptomatic=[0.1, 1.0],
+            p_external_infection_per_day=[0.0, 0.02],
+        )
 
+    log.info(f"Writing totals to: {filename_totals}")
+    log.info(f"Writing daily results to: {filename_daily}")
     with open(filename_totals, "wt") as ft, open(filename_daily, "wt") as fd:
         mc.simulate_all(totals_file=ft, daily_file=fd)
 
@@ -994,11 +1015,11 @@ def main() -> None:
         help="Seed for random number generator"
     )
     parser.add_argument(
-        "--iterations", type=int, default=50,
+        "--iterations", type=int, default=500,
         help="Number of iterations per condition"
     )
     parser.add_argument(
-        "--seed", default=None,
+        "--seed", default=1234, type=str,
         help="Seed for random number generator ('None' gives a random seed)"
     )
     parser.add_argument(
@@ -1011,17 +1032,32 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Logging
     main_only_quicksetup_rootlogger(
         level=logging.DEBUG if args.verbose else logging.INFO,
         with_process_id=True
     )
-    random.seed(args.seed)
-    np.random.seed(args.seed)
 
+    # Self-tests
     if args.selftest:
         selftest()
         return
 
+    # RNG seed
+    try:
+        seed = int(args.seed)
+    except TypeError:  # args.seed likely None
+        seed = None
+    except ValueError:  # a string
+        if args.seed.lower() == "none":
+            seed = None
+        else:
+            raise
+    log.info(f"Using random number generator seed: {seed}")
+    random.seed(seed)
+    np.random.seed(seed)
+
+    # Go
     simulate_all(filename_totals=args.outfile_totals,
                  filename_daily=args.outfile_daily,
                  n_iterations=args.iterations)
