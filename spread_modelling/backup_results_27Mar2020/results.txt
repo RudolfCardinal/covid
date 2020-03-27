@@ -1,0 +1,143 @@
+# A tibble: 16 x 9
+# Groups:   home_visits, clinicians_meet_each_other, social_infectivity_multiple_if_symptomatic [8]
+   home_visits clinicians_meet_e… social_infectivity… p_external_infect… mean_prop_people… mean_prop_clinic… mean_prop_patien… mean_prop_family… mean_n_contacts
+   <lgl>       <lgl>                            <dbl> <fct>                          <dbl>             <dbl>             <dbl>             <dbl>           <dbl>
+ 1 FALSE       FALSE                              0.1 0                             0.0737             0.068            0.0735            0.0738         1086000
+ 2 FALSE       FALSE                              0.1 0.02                          0.796              0.745            0.796             0.796          1086000
+ 3 FALSE       FALSE                              1   0                             0.0730             0.057            0.0729            0.0731         1086000
+ 4 FALSE       FALSE                              1   0.02                          0.796              0.725            0.796             0.797          1086000
+ 5 FALSE       TRUE                               0.1 0                             0.0733             0.126            0.0734            0.0731         1097400
+ 6 FALSE       TRUE                               0.1 0.02                          0.796              0.83             0.797             0.796          1097400
+ 7 FALSE       TRUE                               1   0                             0.0727             0.09             0.0726            0.0727         1097400
+ 8 FALSE       TRUE                               1   0.02                          0.797              0.839            0.796             0.797          1097400
+ 9 TRUE        FALSE                              0.1 0                             0.0730             0.07             0.0728            0.0731         1098000
+10 TRUE        FALSE                              0.1 0.02                          0.796              0.78             0.796             0.796          1098000
+11 TRUE        FALSE                              1   0                             0.0731             0.059            0.0730            0.0732         1098000
+12 TRUE        FALSE                              1   0.02                          0.796              0.754            0.795             0.796          1098000
+13 TRUE        TRUE                               0.1 0                             0.0732             0.136            0.0732            0.0730         1109400
+14 TRUE        TRUE                               0.1 0.02                          0.796              0.843            0.795             0.795          1109400
+15 TRUE        TRUE                               1   0                             0.0729             0.117            0.0734            0.0725         1109400
+16 TRUE        TRUE                               1   0.02                          0.796              0.857            0.796             0.795          1109400
+
+Call:
+lm(formula = n_people_infected ~ home_visits * clinicians_meet_each_other * 
+    p_external_infection_per_day_factor + social_infectivity_multiple_if_symptomatic, 
+    data = totals)
+
+Coefficients:
+                                                                           (Intercept)  
+                                                                              1323.391  
+                                                                       home_visitsTRUE  
+                                                                                -5.990  
+                                                        clinicians_meet_each_otherTRUE  
+                                                                                -7.140  
+                                               p_external_infection_per_day_factor0.02  
+                                                                             13023.610  
+                                            social_infectivity_multiple_if_symptomatic  
+                                                                                -2.183  
+                                        home_visitsTRUE:clinicians_meet_each_otherTRUE  
+                                                                                 6.840  
+                               home_visitsTRUE:p_external_infection_per_day_factor0.02  
+                                                                                -1.630  
+                clinicians_meet_each_otherTRUE:p_external_infection_per_day_factor0.02  
+                                                                                14.510  
+home_visitsTRUE:clinicians_meet_each_otherTRUE:p_external_infection_per_day_factor0.02  
+                                                                               -15.260  
+
+Analysis of Variance Table
+
+Response: n_people_infected
+                                                                            Df     Sum Sq    Mean Sq    F value  Pr(>F)    
+home_visits                                                                  1 1.0368e+04 1.0368e+04 3.3935e+00 0.06583 .  
+clinicians_meet_each_other                                                   1 1.6000e+01 1.6000e+01 5.1000e-03 0.94291    
+p_external_infection_per_day_factor                                          1 3.3937e+10 3.3937e+10 1.1108e+07 < 2e-16 ***
+social_infectivity_multiple_if_symptomatic                                   1 7.7200e+02 7.7200e+02 2.5280e-01 0.61528    
+home_visits:clinicians_meet_each_other                                       1 3.1000e+01 3.1000e+01 1.0200e-02 0.91953    
+home_visits:p_external_infection_per_day_factor                              1 4.2870e+03 4.2870e+03 1.4033e+00 0.23653    
+clinicians_meet_each_other:p_external_infection_per_day_factor               1 2.3670e+03 2.3670e+03 7.7460e-01 0.37906    
+home_visits:clinicians_meet_each_other:p_external_infection_per_day_factor   1 2.9110e+03 2.9110e+03 9.5270e-01 0.32933    
+Residuals                                                                  791 2.4167e+06 3.0550e+03                       
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+Call:
+lm(formula = n_clinicians_infected ~ home_visits * clinicians_meet_each_other * 
+    p_external_infection_per_day_factor + social_infectivity_multiple_if_symptomatic, 
+    data = totals)
+
+Coefficients:
+                                                                           (Intercept)  
+                                                                                1.4028  
+                                                                       home_visitsTRUE  
+                                                                                0.0400  
+                                                        clinicians_meet_each_otherTRUE  
+                                                                                0.9100  
+                                               p_external_infection_per_day_factor0.02  
+                                                                               13.4500  
+                                            social_infectivity_multiple_if_symptomatic  
+                                                                               -0.2778  
+                                        home_visitsTRUE:clinicians_meet_each_otherTRUE  
+                                                                                0.3300  
+                               home_visitsTRUE:p_external_infection_per_day_factor0.02  
+                                                                                0.6000  
+                clinicians_meet_each_otherTRUE:p_external_infection_per_day_factor0.02  
+                                                                                1.0800  
+home_visitsTRUE:clinicians_meet_each_otherTRUE:p_external_infection_per_day_factor0.02  
+                                                                               -0.6600  
+
+Analysis of Variance Table
+
+Response: n_clinicians_infected
+                                                                            Df Sum Sq Mean Sq    F value    Pr(>F)    
+home_visits                                                                  1     23      23     6.2758  0.012439 *  
+clinicians_meet_each_other                                                   1    421     421   114.1432 < 2.2e-16 ***
+p_external_infection_per_day_factor                                          1  39903   39903 10831.5564 < 2.2e-16 ***
+social_infectivity_multiple_if_symptomatic                                   1     12      12     3.3931  0.065845 .  
+home_visits:clinicians_meet_each_other                                       1      0       0     0.0000  1.000000    
+home_visits:p_external_infection_per_day_factor                              1      4       4     0.9894  0.320188    
+clinicians_meet_each_other:p_external_infection_per_day_factor               1     28      28     7.6344  0.005859 ** 
+home_visits:clinicians_meet_each_other:p_external_infection_per_day_factor   1      5       5     1.4780  0.224446    
+Residuals                                                                  791   2914       4                         
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+Call:
+lm(formula = n_contacts ~ home_visits * clinicians_meet_each_other * 
+    p_external_infection_per_day_factor + social_infectivity_multiple_if_symptomatic, 
+    data = totals)
+
+Coefficients:
+                                                                           (Intercept)  
+                                                                             1.086e+06  
+                                                                       home_visitsTRUE  
+                                                                             1.200e+04  
+                                                        clinicians_meet_each_otherTRUE  
+                                                                             1.140e+04  
+                                               p_external_infection_per_day_factor0.02  
+                                                                             5.096e-23  
+                                            social_infectivity_multiple_if_symptomatic  
+                                                                             3.036e-10  
+                                        home_visitsTRUE:clinicians_meet_each_otherTRUE  
+                                                                            -1.103e-09  
+                               home_visitsTRUE:p_external_infection_per_day_factor0.02  
+                                                                            -5.405e-23  
+                clinicians_meet_each_otherTRUE:p_external_infection_per_day_factor0.02  
+                                                                            -4.270e-23  
+home_visitsTRUE:clinicians_meet_each_otherTRUE:p_external_infection_per_day_factor0.02  
+                                                                             1.106e-09  
+
+Analysis of Variance Table
+
+Response: n_contacts
+                                                                            Df     Sum Sq    Mean Sq    F value Pr(>F)    
+home_visits                                                                  1 2.8800e+10 2.8800e+10 1.9052e+27 <2e-16 ***
+clinicians_meet_each_other                                                   1 2.5992e+10 2.5992e+10 1.7194e+27 <2e-16 ***
+p_external_infection_per_day_factor                                          1 0.0000e+00 0.0000e+00 1.0122e+00 0.3147    
+social_infectivity_multiple_if_symptomatic                                   1 0.0000e+00 0.0000e+00 9.8790e-01 0.3206    
+home_visits:clinicians_meet_each_other                                       1 0.0000e+00 0.0000e+00 9.9910e-01 0.3178    
+home_visits:p_external_infection_per_day_factor                              1 0.0000e+00 0.0000e+00 1.0122e+00 0.3147    
+clinicians_meet_each_other:p_external_infection_per_day_factor               1 0.0000e+00 0.0000e+00 1.0122e+00 0.3147    
+home_visits:clinicians_meet_each_other:p_external_infection_per_day_factor   1 0.0000e+00 0.0000e+00 1.0122e+00 0.3147    
+Residuals                                                                  791 0.0000e+00 0.0000e+00                      
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1

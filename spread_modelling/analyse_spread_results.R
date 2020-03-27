@@ -36,6 +36,8 @@ totals[, prop_people_infected := n_people_infected / n_people]
 totals[, prop_clinicians_infected := n_clinicians_infected / n_clinicians]
 totals[, prop_patients_infected := n_patients_infected / n_patients]
 totals[, prop_family_infected := n_family_infected / n_family]
+totals[, p_external_infection_per_day_factor := as.factor(
+    p_external_infection_per_day)]
 
 daily <- data.table(read.csv(DAILY_FILENAME))
 daily[, home_visits := as.logical(home_visits)]
@@ -43,16 +45,22 @@ daily[, clinicians_meet_each_other := as.logical(clinicians_meet_each_other)]
 daily[, group := paste0(
     "HV", as.integer(home_visits), "_",
     "CM", as.integer(clinicians_meet_each_other), "_",
-    "SIMS", social_infectivity_multiple_if_symptomatic
+    "SIMS", social_infectivity_multiple_if_symptomatic, "_",
+    "EXT", p_external_infection_per_day
 )]
 daily[, social_infectivity_multiple_if_symptomatic_factor := as.factor(
     social_infectivity_multiple_if_symptomatic)]
+daily[, p_external_infection_per_day_factor := as.factor(
+    p_external_infection_per_day)]
 
 sink(RESULTS_FILENAME)
 
 s1 <- totals %>%
-    group_by(home_visits, clinicians_meet_each_other,
-             social_infectivity_multiple_if_symptomatic) %>%
+    group_by(
+        home_visits, clinicians_meet_each_other,
+        social_infectivity_multiple_if_symptomatic,
+        p_external_infection_per_day_factor
+    ) %>%
     summarise(
         mean_prop_people_infected = mean(prop_people_infected),
         mean_prop_clinicians_infected = mean(prop_clinicians_infected),
@@ -82,7 +90,7 @@ daily_long <- daily %>%
 # These analyses don't take account of "day" properly:
 m1 <- lm(
     n_people_infected ~
-        home_visits * clinicians_meet_each_other +
+        home_visits * clinicians_meet_each_other * p_external_infection_per_day_factor +
         social_infectivity_multiple_if_symptomatic,
     data = totals)
 print(m1)
@@ -90,7 +98,7 @@ print(anova(m1))
 
 m2 <- lm(
     n_clinicians_infected ~
-        home_visits * clinicians_meet_each_other +
+        home_visits * clinicians_meet_each_other * p_external_infection_per_day_factor +
         social_infectivity_multiple_if_symptomatic,
     data = totals)
 print(m2)
@@ -98,7 +106,7 @@ print(anova(m2))
 
 m3 <- lm(
     n_contacts ~
-        home_visits * clinicians_meet_each_other +
+        home_visits * clinicians_meet_each_other * p_external_infection_per_day_factor +
         social_infectivity_multiple_if_symptomatic,
     data = totals)
 print(m3)
@@ -106,9 +114,9 @@ print(anova(m3))
 
 sink()
 
-plotdata <- daily
-# plotdata <- daily[social_infectivity_multiple_if_symptomatic == 1.0]
-# plotdata <- daily[social_infectivity_multiple_if_symptomatic == 0.1]
+# Faceting on this doesn't work well -- scales too disparate:
+plotdata_a <- daily[p_external_infection_per_day_factor == 0]
+plotdata_b <- daily[p_external_infection_per_day_factor == 0.02]
 common_elements <- list(
     theme_bw(),
     scale_colour_manual(values = c("blue", "red")),
@@ -116,44 +124,90 @@ common_elements <- list(
     scale_size_manual(values = c(0.5, 2)),
     scale_y_continuous(limits = c(0, NA))
 )
-p1 <- (
+p1a <- (
     ggplot(
-        plotdata,
+        plotdata_a,
         aes(x = day, y = n_clinicians_infected, group = group,
             colour = home_visits,
             linetype = clinicians_meet_each_other,
             size = social_infectivity_multiple_if_symptomatic_factor)
     ) +
     stat_smooth() +
-    common_elements
+    common_elements +
+    theme(legend.position = "bottom") +
+    ggtitle("Infected CLINICIANS: no incoming infection")
 )
-p2 <- (
+p1b <- (
     ggplot(
-        plotdata,
+        plotdata_b,
+        aes(x = day, y = n_clinicians_infected, group = group,
+            colour = home_visits,
+            linetype = clinicians_meet_each_other,
+            size = social_infectivity_multiple_if_symptomatic_factor)
+    ) +
+    stat_smooth() +
+    common_elements +
+    theme(legend.position = "none") +
+    ggtitle("Infected CLINICIANS: external infection")
+)
+p2a <- (
+    ggplot(
+        plotdata_a,
         aes(x = day, y = n_people_infected, group = group,
             colour = home_visits,
             linetype = clinicians_meet_each_other,
             size = social_infectivity_multiple_if_symptomatic_factor)
     ) +
     stat_smooth() +
-    common_elements
+    common_elements +
+    theme(legend.position = "none") +
+    ggtitle("Infected PEOPLE: no incoming infection")
 )
-p3 <- (
+p2b <- (
     ggplot(
-        plotdata,
+        plotdata_b,
+        aes(x = day, y = n_people_infected, group = group,
+            colour = home_visits,
+            linetype = clinicians_meet_each_other,
+            size = social_infectivity_multiple_if_symptomatic_factor)
+    ) +
+    stat_smooth() +
+    common_elements +
+    theme(legend.position = "none") +
+    ggtitle("Infected PEOPLE: external infection")
+)
+p3a <- (
+    ggplot(
+        plotdata_a,
         aes(x = day, y = n_contacts, group = group,
             colour = home_visits,
             linetype = clinicians_meet_each_other,
             size = social_infectivity_multiple_if_symptomatic_factor)
     ) +
     geom_line() +
-    common_elements
+    common_elements +
+    theme(legend.position = "none") +
+    ggtitle("#Contacts")
+)
+p3b <- (
+    ggplot(
+        plotdata_b,
+        aes(x = day, y = n_contacts, group = group,
+            colour = home_visits,
+            linetype = clinicians_meet_each_other,
+            size = social_infectivity_multiple_if_symptomatic_factor)
+    ) +
+    geom_line() +
+    common_elements +
+    theme(legend.position = "none") +
+    ggtitle("#Contacts")
 )
 
 fig <- (
-    (p1 | p2) /
-    p3 +
+    (p1a | p1b) /
+    (p2a | p2b) /
+    (p3a | p3b) +
     plot_layout(guides = "collect")
 )
 
-ggsave(FIGURE_FILENAME, fig, width = 20, height = 20, units = "cm")
+ggsave(FIGURE_FILENAME, fig, width = 40, height = 30, units = "cm")
