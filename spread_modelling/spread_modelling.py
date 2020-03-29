@@ -1,15 +1,38 @@
 #!/usr/bin/env python
-# spread_modelling.py
 
 """
+spread_modelling.py
+
+===============================================================================
+
+    Copyright (C) 2020-2020 Rudolf Cardinal (rudolf@pobox.com).
+
+    This is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This software is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this software. If not, see <http://www.gnu.org/licenses/>.
+
+===============================================================================
+
+Models the spread of an infection such as SARS-CoV-2 coronavirus (COVID-19
+disease) under different models of community mental health care.
+
 Time units are days.
 
-Re infectivity:
+Re transmission risk (infectivity):
 
 - The basic reproduction number R0 is the expected number of secondary cases
   produced by a single infection in a completely susceptible population. It is
   OF THE ORDER of 2.4 for SARS-CoV-2 (the virus) or COVID-19 (the disease).
-
+  
   - https://www.imperial.ac.uk/media/imperial-college/medicine/sph/ide/gida-fellowships/Imperial-College-COVID19-NPI-modelling-16-03-2020.pdf
     ... using 2.4 (but examing range 2.0-2.6)
 
@@ -31,7 +54,8 @@ Re infectivity:
   .. code-block:: none
 
     τ     = transmissibility
-          = p(infection | contact between a susceptible and an infected individual)
+          = p(infection | contact between a susceptible and an infected
+                          individual)
 
     c_bar = average rate of contact between susceptible and infected
              (contacts per unit time)
@@ -47,6 +71,7 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 import cProfile
 import csv
+from enum import Enum
 from itertools import combinations, product
 import logging
 import multiprocessing
@@ -66,12 +91,36 @@ log = logging.getLogger(__name__)
 # =============================================================================
 
 FuncType = Callable[[Any], Any]
-PROFILE = False  # perform a debugging run with profiling on
-NUMPY_COIN = False  # True is slower
+NUMPY_COIN = False  # True (numpy) is slower
 THIS_DIR = os.path.abspath(os.path.dirname(__file__))
 
-DEFAULT_SOCIAL_INFECTIVITY_MULTIPLE_IF_SYMPTOMATIC = 0.5
-DEFAULT_OUTPUT_DIR = os.path.expanduser("~/tmp/cpft_covid_modelling")
+DEFAULT_BEHAV_INFECTIVITY_MULTIPLE_IF_SYMPTOMATIC = 0.5
+# DEFAULT_OUTPUT_DIR = os.path.expanduser("~/tmp/cpft_covid_modelling")
+DEFAULT_OUTPUT_DIR = os.path.join(THIS_DIR, "results")
+
+N_ITERATIONS = 2000
+
+
+class Appointment(Enum):
+    """
+    The way in which clinical appointments are conducted.
+    """
+    HOME_VISIT = "home_visit"
+    CLINIC = "clinic"
+    REMOTE = "remote"
+
+    def __str__(self):
+        return self.value
+
+
+class RunMode(Enum):
+    """
+    Mode of running the program.
+    """
+    DEBUG_SINGLE = "debug_single"
+    DEBUG_PROFILE = "debug_profile"
+    DEBUG_CHECK_N_ITERATIONS = "debug_check_n_iterations"
+    FULL = "full"
 
 
 # =============================================================================
@@ -154,17 +203,18 @@ class Config(object):
             infectious_for_t: float = 7.0,
             symptoms_for_t: float = 7.0,
             p_infect_for_full_day_exposure: float = 0.2,
-            social_infectivity_multiple_if_symptomatic: float = DEFAULT_SOCIAL_INFECTIVITY_MULTIPLE_IF_SYMPTOMATIC,  # noqa
+            behavioural_infectivity_multiple_if_symptomatic: float =
+            DEFAULT_BEHAV_INFECTIVITY_MULTIPLE_IF_SYMPTOMATIC,  # noqa
             # Population: parameters governing social interaction etc.
-            home_visits: bool = False,
+            appointment_type: Appointment = Appointment.CLINIC,
             clinicians_meet_each_other: bool = False,
             n_clinicians: int = 20,
             n_patients_per_clinician_per_day: int = 5,
-            variable_n_family: bool = False,  # needless reduction in power  # noqa
-            mean_n_family_members_per_patient: float = 2,
+            variable_n_family: bool = True,  # needless reduction in power
+            mean_n_family_members_per_patient: float = 1.37,
             n_days: int = 60,
             p_baseline_infected: float = 0.05,
-            p_external_infection_per_day: float = 0.0,  # 0.001,
+            p_external_infection_per_day: float = 0.0,
             prop_day_clinician_patient_interaction: float = 1 / 24,
             prop_day_family_interaction: float = 8 / 24,
             prop_day_clinician_clinician_interaction: float = 1 / 24,
@@ -196,29 +246,30 @@ class Config(object):
                 (PATIENT.)
                 Duration of infectivity. This is extremely crude.
                 Stepwise function in which people are infectious at a constant
-                rate for this many days. 7 is the number of days of
+                rate for this many days. IMPRECISE; 7 is the number of days of
                 self-isolation recommended by the UK government after symptoms,
                 2020-03-24.
             symptoms_for_t:
                 (PATIENT.)
                 Time for which symptoms persist, once developed.
-                Also a GUESS. See below re why this shouldn't matter much.
+                Also IMPRECISE. See below re why this shouldn't matter much.
             p_infect_for_full_day_exposure:
                 (PATIENT.)
                 Probability, when infectious, of infecting someone if exposed
                 to them for 24 hours per day.
-                GUESS. As long as it's constant, it's not so important -- we
-                are interested in relative change due to social manipulations,
-                rather than absolute rates.
-            social_infectivity_multiple_if_symptomatic:
+                IMPRECISE. As long as it's constant, it's not so important --
+                we are interested in relative change due to social
+                manipulations, rather than absolute rates.
+            behavioural_infectivity_multiple_if_symptomatic:
                 (PATIENT.)
                 If this patient is symptomatic, how should infectivity be
-                multiplied? This might include numbers >1 (symptomatic people
-                are more infectious) or <1 (infection control measures can be
-                taken for symptomatic people, e.g. wearing a mask).
+                multiplied *behaviourally*? This is expected to be <1
+                (infection control measures can be taken for symptomatic
+                people, e.g. wearing a mask) and is distinct from the
+                biological change (see above).
 
-            home_visits:
-                Do clinicians visit patients at home (and thus their family)?
+            appointment_type:
+                Type of appointment (see text).
             clinicians_meet_each_other:
                 Do clinicians in this team meet each other daily?
             n_clinicians:
@@ -229,11 +280,14 @@ class Config(object):
             variable_n_family:
                 Allow the number of family members to vary?
                 Warning: increases variability, so loses power.
+                But adds realism.
             mean_n_family_members_per_patient:
                 Mean number of other family members per patient (Poisson
                 lambda). If ``variable_n_family`` is ``False``, this number is
                 rounded to give the (fixed) number of other family members per
                 patient.
+                The mean UK household size in 2019 was 2.37 (Office for
+                National Statistics), so 1.37 people other than the patient.
             n_days:
                 Number of days to simulate.
             p_baseline_infected:
@@ -277,31 +331,41 @@ class Config(object):
 
         """  # noqa
 
-        assert social_infectivity_multiple_if_symptomatic >= 0.0
+        assert behavioural_infectivity_multiple_if_symptomatic >= 0.0
 
-        self.pathogenicity_p_symptoms_if_infected = pathogenicity_p_symptoms_if_infected  # noqa
-        self.biological_asymptomatic_infectivity_factor = biological_asymptomatic_infectivity_factor  # noqa
-        self.t_infected_to_symptoms_incubation_period = t_infected_to_symptoms_incubation_period  # noqa
+        self.pathogenicity_p_symptoms_if_infected = \
+            pathogenicity_p_symptoms_if_infected
+        self.biological_asymptomatic_infectivity_factor = \
+            biological_asymptomatic_infectivity_factor
+        self.t_infected_to_symptoms_incubation_period = \
+            t_infected_to_symptoms_incubation_period
         self.t_infected_to_infectious = t_infected_to_infectious
         self.infectious_for_t = infectious_for_t
         self.symptoms_for_t = symptoms_for_t
         self.p_infect_for_full_day_exposure = p_infect_for_full_day_exposure
-        self.social_infectivity_multiple_if_symptomatic = social_infectivity_multiple_if_symptomatic  # noqa
+        self.behavioural_infectivity_multiple_if_symptomatic = \
+            behavioural_infectivity_multiple_if_symptomatic
 
-        self.home_visits = home_visits
+        self.appointment_type = appointment_type
         self.clinicians_meet_each_other = clinicians_meet_each_other
         self.n_clinicians = n_clinicians
-        self.n_patients_per_clinician_per_day = n_patients_per_clinician_per_day  # noqa
+        self.n_patients_per_clinician_per_day = \
+            n_patients_per_clinician_per_day
         self.variable_n_family = variable_n_family
-        self.mean_n_family_members_per_patient = mean_n_family_members_per_patient  # noqa
+        self.mean_n_family_members_per_patient = \
+            mean_n_family_members_per_patient
         self.n_days = n_days
         self.p_baseline_infected = p_baseline_infected
         self.p_external_infection_per_day = p_external_infection_per_day
-        self.prop_day_clinician_patient_interaction = prop_day_clinician_patient_interaction  # noqa
+        self.prop_day_clinician_patient_interaction = \
+            prop_day_clinician_patient_interaction
         self.prop_day_family_interaction = prop_day_family_interaction
-        self.prop_day_clinician_clinician_interaction = prop_day_clinician_clinician_interaction  # noqa
-        self.prop_day_clinician_family_intervention = prop_day_clinician_family_intervention  # noqa
-        self.n_random_social_contacts_per_day = n_random_social_contacts_per_day  # noqa
+        self.prop_day_clinician_clinician_interaction = \
+            prop_day_clinician_clinician_interaction
+        self.prop_day_clinician_family_intervention = \
+            prop_day_clinician_family_intervention
+        self.n_random_social_contacts_per_day = \
+            n_random_social_contacts_per_day
         self.prop_day_random_social_contact = prop_day_random_social_contact
 
         self.iteration = iteration
@@ -328,6 +392,9 @@ class Metaconfig(object):
         self.kwargs = kwargs
 
     def gen_configs(self) -> Iterable[Config]:
+        """
+        Generates all possible configs.
+        """
         gen_combinations = product_dict(
             iteration=range(1, self.n_iterations + 1),
             **self.kwargs
@@ -441,20 +508,28 @@ class Person(object):
         self.name = name
 
         # Copy for speed (saves self.config.X indirection each time):
-        self.biological_asymptomatic_infectivity_factor = config.biological_asymptomatic_infectivity_factor  # noqa
+        self.biological_asymptomatic_infectivity_factor = \
+            config.biological_asymptomatic_infectivity_factor
         self.infectious_for_t = config.infectious_for_t
-        self.p_infect_for_full_day_exposure = config.p_infect_for_full_day_exposure  # noqa
-        self.social_infectivity_multiple_if_symptomatic = config.social_infectivity_multiple_if_symptomatic  # noqa
+        self.p_infect_for_full_day_exposure = \
+            config.p_infect_for_full_day_exposure
+        self.behavioural_infectivity_multiple_if_symptomatic = \
+            config.behavioural_infectivity_multiple_if_symptomatic
         self.symptoms_for_t = config.symptoms_for_t
         self.t_days_infected_to_infectious = config.t_infected_to_infectious
-        self.t_infected_to_symptoms_incubation_period = config.t_infected_to_symptoms_incubation_period  # noqa
+        self.t_infected_to_symptoms_incubation_period = \
+            config.t_infected_to_symptoms_incubation_period
 
-        self._symptomatic_if_infected = coin(config.pathogenicity_p_symptoms_if_infected)  # noqa
+        self._symptomatic_if_infected = coin(
+            config.pathogenicity_p_symptoms_if_infected)
 
         self.infected = False  # infected at some point?
         self.infected_at = None  # type: Optional[float]
 
     def __str__(self) -> str:
+        """
+        String representation.
+        """
         if self.infected:
             status = f"infected_at_{self.infected_at}"
         else:
@@ -476,7 +551,7 @@ class Person(object):
         """
         if not self.infected:
             return None
-        return float(now - self.infected_at)
+        return now - self.infected_at
 
     def time_since_infectious(self, now: float) -> Optional[float]:
         """
@@ -525,20 +600,18 @@ class Person(object):
                 the basis that longer exposure increases risk).
 
         """
+        # Very crude model:
         t_since_infectious = self.time_since_infectious(now)
         if t_since_infectious is None:
             return 0.0
-        # Very crude model:
+        if t_since_infectious >= self.infectious_for_t:
+            # Past the infectious period
+            return 0.0
 
-        p_infect = (
-            self.p_infect_for_full_day_exposure
-            if t_since_infectious < self.infectious_for_t
-            else 0.0
-        )
-        p_infect *= prop_full_day
+        p_infect = self.p_infect_for_full_day_exposure * prop_full_day
         if self.symptomatic(now):
             # Symptomatic; people may wear PPE etc.
-            p_infect *= self.social_infectivity_multiple_if_symptomatic
+            p_infect *= self.behavioural_infectivity_multiple_if_symptomatic
         else:
             # Asymptomatic; probably less infectious biologically
             p_infect *= self.biological_asymptomatic_infectivity_factor
@@ -578,7 +651,7 @@ class Person(object):
         infectivity = other.infectivity(now, prop_full_day)
         if infectivity <= 0.0:
             return
-        if coin(infectivity):  # noqa
+        if coin(infectivity):
             self.infect(now, other)
 
     def mutually_expose(self, other: "Person", now: float,
@@ -615,26 +688,13 @@ class Population(object):
         """
         self.config = config
 
-        self.clinicians_meet_each_other = config.clinicians_meet_each_other
-        self.home_visits = config.home_visits
-        self.n_clinicians = config.n_clinicians
-        self.n_days = config.n_days
-        self.n_patients_per_clinician_per_day = config.n_patients_per_clinician_per_day  # noqa
-        self.p_external_infection_per_day = config.p_external_infection_per_day
-        self.n_patients_per_clinician = config.n_patients_per_clinician_per_day * config.n_days  # noqa
+        self.n_patients_per_clinician = \
+            config.n_patients_per_clinician_per_day * config.n_days
         self.n_patients = config.n_clinicians * self.n_patients_per_clinician
-        self.n_random_social_contacts_per_day = config.n_random_social_contacts_per_day  # noqa
-        self.p_baseline_infected = config.p_baseline_infected
-        self.prop_day_clinician_clinician_interaction = config.prop_day_clinician_clinician_interaction  # noqa
-        self.prop_day_clinician_family_intervention = config.prop_day_clinician_family_intervention  # noqa
-        self.prop_day_clinician_patient_interaction = config.prop_day_clinician_patient_interaction  # noqa
-        self.prop_day_family_interaction = config.prop_day_family_interaction
-        self.prop_day_random_social_contact = config.prop_day_random_social_contact  # noqa
-        self.social_infectivity_multiple_if_symptomatic = config.social_infectivity_multiple_if_symptomatic  # noqa
 
         self.clinicians = [
             Person(name=f"Clinician_{i + 1}", config=config)
-            for i in range(self.n_clinicians)
+            for i in range(self.config.n_clinicians)
         ]
         self.family = []  # type: List[Person]
         self.patients = [
@@ -662,7 +722,7 @@ class Population(object):
 
         # Baseline infection
         for p in self.gen_people():
-            if coin(self.p_baseline_infected):
+            if coin(self.config.p_baseline_infected):
                 p.infect(0)
 
         # Logging. Keys are day number.
@@ -686,6 +746,10 @@ class Population(object):
             yield p
 
     def person_at_idx(self, idx: int) -> Person:
+        """
+        Returns the person at a given zero-based index, across all types of
+        people.
+        """
         assert idx >= 0
         if idx < len(self.clinicians):
             return self.clinicians[idx]
@@ -705,16 +769,17 @@ class Population(object):
         Yield patients to be seen today by a given clinician.
         """
         assert clinician in self.clinicians
-        assert 1 <= today <= self.n_days
+        assert 1 <= today <= self.config.n_days
         today_zb = today - 1
         clinician_idx = self.clinicians.index(clinician)
         first_patient_idx = (
             clinician_idx * self.n_patients_per_clinician +
-            today_zb * self.n_patients_per_clinician_per_day
+            today_zb * self.config.n_patients_per_clinician_per_day
         )
         for patient_idx in range(
                 first_patient_idx,
-                first_patient_idx + self.n_patients_per_clinician_per_day):
+                first_patient_idx +
+                self.config.n_patients_per_clinician_per_day):
             yield self.patients[patient_idx]
 
     def simulate_day(self, today: int) -> None:
@@ -722,6 +787,9 @@ class Population(object):
         Simulate a specific day's interactions.
         """
         def expose(p1_: Person, p2_: Person, prop_day: float) -> None:
+            """
+            Expose two people to each other.
+            """
             assert p1_ is not p2_
             self.total_n_contacts += 1
             self.daily_contacts[today] += 1
@@ -729,38 +797,55 @@ class Population(object):
 
         log.debug(f"Simulating day {today}...")
         now = float(today)
+
         # Simulate infection from outside our group:
+        p_external_infection = self.config.p_external_infection_per_day
         for p in self.gen_people():
-            if p.susceptible() and coin(self.p_external_infection_per_day):
+            if p.susceptible() and coin(p_external_infection):
                 p.infect(now)
+
+        # Household interactions:
+        prop_day_family = self.config.prop_day_family_interaction
         for p in self.patients:
             # Patients interact with their family:
             family = self.p2f[p]
             for f in family:
-                expose(p, f, self.prop_day_family_interaction)
+                expose(p, f, prop_day_family)
             # Family interact with each other
             for f1, f2 in combinations(family, r=2):  # type: Person, Person
-                expose(f1, f2, self.prop_day_family_interaction)
-        # Clinicians see their patients:
-        for c in self.clinicians:
-            for p in self.patients_for_clinician(c, today):
-                expose(c, p, self.prop_day_clinician_patient_interaction)
-                # Clinicians might meet the family:
-                if self.home_visits:
-                    family = self.p2f[p]
-                    for f in family:
-                        expose(c, f,
-                               self.prop_day_clinician_family_intervention)
+                expose(f1, f2, prop_day_family)
+
+        appointment_type = self.config.appointment_type
+        if appointment_type in [Appointment.HOME_VISIT, Appointment.CLINIC]:
+            # Clinicians meet their patients:
+            prop_day_c_p = self.config.prop_day_clinician_patient_interaction
+            for c in self.clinicians:
+                for p in self.patients_for_clinician(c, today):
+                    expose(c, p, prop_day_c_p)
+                    # Clinicians might meet the family:
+                    if appointment_type == Appointment.HOME_VISIT:
+                        family = self.p2f[p]
+                        for f in family:
+                            expose(c, f, prop_day_c_p)
+        elif appointment_type == Appointment.REMOTE:
+            # Nobody meets up
+            pass
+        else:
+            raise ValueError("Bad appointment type")
 
         # Clinicians may get together (e.g. share a base, meet up):
-        if self.clinicians_meet_each_other:
+        if self.config.clinicians_meet_each_other:
+            prop_day_c_c = self.config.prop_day_clinician_clinician_interaction
             for c1, c2 in combinations(self.clinicians, r=2):  # type: Person, Person  # noqa
-                expose(c1, c2,
-                       self.prop_day_clinician_clinician_interaction)
+                expose(c1, c2, prop_day_c_c)
 
-        if self.n_random_social_contacts_per_day > 0:
-            n_random_contacts = min(self.n_random_social_contacts_per_day,
-                                    self.n_people())
+        # Random contacts within the population?
+        if self.config.n_random_social_contacts_per_day > 0:
+            prop_day_random = self.config.prop_day_random_social_contact
+            n_random_contacts = min(
+                self.config.n_random_social_contacts_per_day,
+                self.n_people()
+            )
             log.debug(f"Random social contacts with "
                       f"{n_random_contacts} people each")
             for p1 in self.gen_people():
@@ -773,8 +858,9 @@ class Population(object):
                     p2 = self.person_at_idx(p2idx)
                     if p2 is p1:
                         continue
-                    expose(p1, p2, self.prop_day_random_social_contact)
+                    expose(p1, p2, prop_day_random)
 
+        # Done. Tot up the day's totals for efficiency later.
         self._update_day_totals(today)
         log.debug(f"... day {today} had {self.daily_contacts[today]} contacts")
 
@@ -803,7 +889,7 @@ class Population(object):
         """
         Simulate all days.
         """
-        for day in range(1, self.n_days + 1):
+        for day in range(1, self.config.n_days + 1):
             self.simulate_day(day)
 
     def n_people_infected(self) -> int:
@@ -861,7 +947,7 @@ class Population(object):
         """
         return [
             self.n_patients, self.n_patients_infected(),
-            self.n_clinicians, self.n_clinicians_infected(),
+            self.config.n_clinicians, self.n_clinicians_infected(),
             self.n_family(), self.n_family_infected(),
             self.n_people(), self.n_people_infected(),
             self.total_n_contacts,
@@ -885,7 +971,7 @@ class Population(object):
         """
         CSV data row for the "people" output.
         """
-        for day in range(1, self.n_days + 1):
+        for day in range(1, self.config.n_days + 1):
             yield [
                 day,
                 self.n_people_infected_by(day),
@@ -934,9 +1020,7 @@ class Population(object):
 
 def simulate_all(filename_totals: str,
                  filename_daily: str,
-                 n_iterations: int,
-                 debug_simple: bool = False,
-                 debug_profile: bool = PROFILE) -> None:
+                 runmode: RunMode) -> None:
     """
     Simulate our interactions and save the results.
 
@@ -945,32 +1029,44 @@ def simulate_all(filename_totals: str,
             output filename for whole-run totals
         filename_daily:
             output filename for day-by-day details
-        n_iterations:
+        runmode:
+            Method of running the program.
             number of iterations to run
-        debug_simple:
-            single iteration, simplified mode
-        debug_profile:
-            several iterations, for profiling
     """
-    if debug_simple or debug_profile:
-        mc = Metaconfig(
-            n_iterations=1 if debug_simple else 24,
-            home_visits=[True],
-            clinicians_meet_each_other=[True],
-            social_infectivity_multiple_if_symptomatic=[0.1],
-            p_external_infection_per_day=[0.01],
-        )
-    else:
-        # ---------------------------------------------------------------------
-        # MAIN SETTINGS
-        # ---------------------------------------------------------------------
+    if runmode in [RunMode.DEBUG_SINGLE, RunMode.DEBUG_PROFILE]:
+        n_iterations = 1 if runmode == RunMode.DEBUG_SINGLE else 24
         mc = Metaconfig(
             n_iterations=n_iterations,
-            home_visits=[True, False],
+            appointment_type=[Appointment.HOME_VISIT],
+            clinicians_meet_each_other=[True],
+            behavioural_infectivity_multiple_if_symptomatic=[0.1],
+            p_baseline_infected=[0.05],
+            p_external_infection_per_day=[0.01],
+        )
+    elif runmode == RunMode.DEBUG_CHECK_N_ITERATIONS:
+        mc = Metaconfig(
+            n_iterations=N_ITERATIONS,
+            appointment_type=[Appointment.HOME_VISIT],
+            clinicians_meet_each_other=[True],
+            behavioural_infectivity_multiple_if_symptomatic=[0.1],
+            p_baseline_infected=[0.01],
+            p_external_infection_per_day=[0.0],
+        )
+    elif runmode == RunMode.FULL:
+        # ---------------------------------------------------------------------
+        # MAIN EXPERIMENTAL SETTINGS
+        # ---------------------------------------------------------------------
+        mc = Metaconfig(
+            n_iterations=N_ITERATIONS,
+            appointment_type=[x for x in Appointment],
+            # ... can do list(Appointment) but the type checker complains
             clinicians_meet_each_other=[True, False],
-            social_infectivity_multiple_if_symptomatic=[0.1, 1.0],
+            behavioural_infectivity_multiple_if_symptomatic=[0.1, 1.0],
+            p_baseline_infected=[0.01, 0.05],
             p_external_infection_per_day=[0.0, 0.02],
         )
+    else:
+        raise ValueError(f"Unknown runmode: {runmode!r}")
 
     log.info(f"Writing totals to: {filename_totals}")
     log.info(f"Writing daily results to: {filename_daily}")
@@ -1015,8 +1111,9 @@ def main() -> None:
         help="Seed for random number generator"
     )
     parser.add_argument(
-        "--iterations", type=int, default=500,
-        help="Number of iterations per condition"
+        "--runmode", type=str, default=RunMode.FULL.value,
+        choices=[x.value for x in RunMode],
+        help="Method of running the program"
     )
     parser.add_argument(
         "--seed", default=1234, type=str,
@@ -1057,14 +1154,19 @@ def main() -> None:
     random.seed(seed)
     np.random.seed(seed)
 
+    # Run mode
+    runmode = RunMode(args.runmode)
+
+    # Profile?
+    if runmode == RunMode.DEBUG_PROFILE:
+        runfunc = do_cprofile(simulate_all)
+    else:
+        runfunc = simulate_all
+
     # Go
-    simulate_all(filename_totals=args.outfile_totals,
-                 filename_daily=args.outfile_daily,
-                 n_iterations=args.iterations)
-
-
-if PROFILE:
-    main = do_cprofile(main)
+    runfunc(filename_totals=args.outfile_totals,
+            filename_daily=args.outfile_daily,
+            runmode=RunMode(args.runmode))
 
 
 if __name__ == "__main__":
