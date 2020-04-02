@@ -136,7 +136,9 @@ write_title <- function(title, subtitle = FALSE,
 {
     spacer <- ifelse(subtitle, LINEBREAK_2, LINEBREAK_1)
     sink(filename, append = append)
-    cat(spacer,
+    cat("\n",
+        "\n",
+        spacer,
         title, "\n",
         spacer, sep = "")
     sink()
@@ -160,12 +162,12 @@ write_lm_and_anova <- function(formula, data, append = TRUE,
     sink(filename, append = append)
 
     cat(LINEBREAK_2)
-    cat("Linear model [using contr.treatment] for:\n")
+    cat("\nLinear model [using contr.treatment] for:\n")
     print(formula)
     options(contrasts = CONTRASTS_FOR_LEVEL_DIFFS)
     print(lm(formula = formula, data = data))
 
-    cat("ANOVA with type III sums of squares [using contr.sum] for:\n")
+    cat("\nANOVA with type III sums of squares [using contr.sum] for:\n")
     print(formula)
     options(contrasts = CONTRASTS_FOR_TYPE_III_SS)
     print(Anova(lm(formula = formula, data = data), type = "III"))
@@ -225,6 +227,7 @@ if (PERFORM_ANALYSIS) {
     # Whole population infections
     # -------------------------------------------------------------------------
     write_title("Whole population infection")
+    write_title("Whole population: full model", subtitle = TRUE)
     write_lm_and_anova(
         log10_people_infected ~
             appointment_type *
@@ -234,12 +237,24 @@ if (PERFORM_ANALYSIS) {
             sx_behav_effect,
         data = totals
     )
+    write_title("Whole population: mean comparisons", subtitle = TRUE)
     write_output(mean(totals[appointment_type == "remote", prop_people_infected]))
     write_output(mean(totals[appointment_type == "clinic", prop_people_infected]))
     write_output(mean(totals[appointment_type == "home_visit", prop_people_infected]))
     write_output(
         mean(totals[appointment_type == "home_visit", prop_people_infected]) -
         mean(totals[appointment_type == "remote", prop_people_infected])
+    )
+    write_title(paste0(
+        "Whole population: highly simplified model ",
+        "(illustrates smaller 'bad' (+) effect of 'bad behaviour' ",
+        "(sx_behav_effect1) at 'bad infection rate' ",
+        "(p_external_infection_per_day0.02)", subtitle = TRUE)
+    write_lm_and_anova(
+        log10_people_infected ~
+            p_external_infection_per_day *
+            sx_behav_effect,
+        data = totals
     )
 
     # -------------------------------------------------------------------------
