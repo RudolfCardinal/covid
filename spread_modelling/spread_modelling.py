@@ -586,21 +586,6 @@ class Person(object):
             return None
         return now - self.infected_at
 
-    def time_since_infectious(self, now: float) -> Optional[float]:
-        """
-        Time since the patient became infectious to others, or ``None`` if
-        never infected.
-
-        Args:
-            now: time now
-        """
-        t_since_infected = self.time_since_infected(now)
-        if t_since_infected is None:
-            return None
-        if t_since_infected < self.t_infected_to_infectious:
-            return None
-        return t_since_infected - self.t_infected_to_infectious
-
     def symptomatic(self, now: float) -> bool:
         """
         Is the patient currently symptomatic?
@@ -634,11 +619,7 @@ class Person(object):
 
         """
         # Very crude model:
-        t_since_infectious = self.time_since_infectious(now)
-        if t_since_infectious is None:
-            return 0.0
-        if t_since_infectious >= self.infectious_for_t:
-            # Past the infectious period
+        if self.seir_status(now) != InfectionStatus.INFECTIOUS:
             return 0.0
 
         p_infect = self.p_infect_for_full_day_exposure * prop_full_day
