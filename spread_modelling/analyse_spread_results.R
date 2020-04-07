@@ -91,12 +91,42 @@ if (!exists("daily")) {
     daily[, p_external_infection_per_day := as.factor(
         p_external_infection_per_day)]
 
+    setkeyv(daily, c(
+        # Control settings
+        "appointment_type",
+        "clinicians_meet_each_other",
+        "sx_behav_effect",
+        "p_baseline_infected",
+        "p_external_infection_per_day",
+        # Run details
+        "iteration",
+        "day"
+    ))
+    daily <- daily %>%
+        group_by(
+            appointment_type,
+            clinicians_meet_each_other,
+            sx_behav_effect,
+            p_baseline_infected,
+            p_external_infection_per_day,
+            iteration
+        ) %>%
+        mutate(
+            cum_n_people_infected = cumsum(n_people_infected),
+            cum_n_clinicians_infected = cumsum(n_clinicians_infected),
+            cum_n_patients_infected = cumsum(n_patients_infected),
+            cum_n_family_infected = cumsum(n_family_infected)
+        ) %>%
+        as.data.table()
+
     daily[, group := paste0(
         "AT", appointment_type, "_",
         "CM", as.integer(clinicians_meet_each_other), "_",
         "SIMS", sx_behav_effect, "_",
+        "BL", p_baseline_infected, "_",
         "EXT", p_external_infection_per_day
     )]
+
 }
 
 
@@ -205,17 +235,17 @@ if (PERFORM_ANALYSIS) {
     daily_long <- daily %>%
         gather(key = who,
                value = n_infected,
-               n_people_infected,
-               n_clinicians_infected,
-               n_patients_infected,
-               n_family_infected) %>%
+               cum_n_people_infected,
+               cum_n_clinicians_infected,
+               cum_n_patients_infected,
+               cum_n_family_infected) %>%
         mutate(
             who = dplyr::recode(
                 who,
-                n_people_infected = "people",
-                n_clinicians_infected = "clinicians",
-                n_patients_infected = "patients",
-                n_family_infected = "family"
+                cum_n_people_infected = "people",
+                cum_n_clinicians_infected = "clinicians",
+                cum_n_patients_infected = "patients",
+                cum_n_family_infected = "family"
             )
         ) %>%
         as.data.table()
@@ -249,7 +279,7 @@ if (PERFORM_ANALYSIS) {
         "Whole population: highly simplified model ",
         "(illustrates smaller 'bad' (+) effect of 'bad behaviour' ",
         "(sx_behav_effect1) at 'bad infection rate' ",
-        "(p_external_infection_per_day0.02)", subtitle = TRUE)
+        "(p_external_infection_per_day0.02)", subtitle = TRUE))
     write_lm_and_anova(
         log10_people_infected ~
             p_external_infection_per_day *
@@ -475,8 +505,8 @@ make_infected_plot <- function(data, y_varname, errbar_varname,
 make_clinician_plot <- function(data, title, y_axis_title = NULL) {
     return(make_infected_plot(
         data = data,
-        y_varname = "mean_n_clinicians_infected",
-        errbar_varname = "errbar_n_clinicians_infected",
+        y_varname = "mean_cum_n_clinicians_infected",
+        errbar_varname = "errbar_cum_n_clinicians_infected",
         title = title,
         y_axis_title = y_axis_title
     ))
@@ -486,29 +516,29 @@ make_clinician_plot <- function(data, title, y_axis_title = NULL) {
 make_people_plot <- function(data, title, y_axis_title = NULL) {
     return(make_infected_plot(
         data = data,
-        y_varname = "mean_n_people_infected",
-        errbar_varname = "errbar_n_people_infected",
+        y_varname = "mean_cum_n_people_infected",
+        errbar_varname = "errbar_cum_n_people_infected",
         title = title,
         y_axis_title = y_axis_title
     ))
 }
 
 
-make_contacts_plot <- function(data, title = "#Contacts") {
-    return(
-        ggplot(
-            data,
-            aes(x = day, y = mean_n_contacts, group = group,
-                colour = appointment_type,
-                linetype = clinicians_meet_each_other,
-                size = sx_behav_effect)
-        ) +
-        geom_line() +
-        COMMON_PLOT_ELEMENTS +
-        theme(legend.position = "none") +
-        ggtitle(title)
-    )
-}
+#make_contacts_plot <- function(data, title = "#Contacts") {
+#    return(
+#        ggplot(
+#            data,
+#            aes(x = day, y = mean_cum_n_contacts, group = group,
+#                colour = appointment_type,
+#                linetype = clinicians_meet_each_other,
+#                size = sx_behav_effect)
+#        ) +
+#        geom_line() +
+#        COMMON_PLOT_ELEMENTS +
+#        theme(legend.position = "none") +
+#        ggtitle(title)
+#    )
+#}
 
 
 # =============================================================================
@@ -536,11 +566,11 @@ plotdata <- daily %>%
         day
     ) %>%
     summarise(
-        mean_n_clinicians_infected = mean(n_clinicians_infected),
-        errbar_n_clinicians_infected = errbar_func(n_clinicians_infected),
-        mean_n_people_infected = mean(n_people_infected),
-        errbar_n_people_infected = errbar_func(n_people_infected),
-        mean_n_contacts = mean(n_contacts)
+        mean_cum_n_clinicians_infected = mean(cum_n_clinicians_infected),
+        errbar_cum_n_clinicians_infected = errbar_func(cum_n_clinicians_infected),
+        mean_cum_n_people_infected = mean(cum_n_people_infected),
+        errbar_cum_n_people_infected = errbar_func(cum_n_people_infected)
+        # mean_cum_n_contacts = mean(cum_n_contacts)
     ) %>%
     mutate(
         p_baseline_infected_numeric := as.numeric(as.character(p_baseline_infected)),
@@ -559,11 +589,13 @@ plotdata <- daily %>%
     as.data.table()
 
 p1 <- (
-    make_people_plot(plotdata, "A. All people", y_axis_title = "Number of people infected") +
+    make_people_plot(plotdata, "A. All people",
+                     y_axis_title = "Cumulative #people infected") +
     facet_grid(. ~ infection_group)
 )
 p2 <- (
-    make_clinician_plot(plotdata, "B. Clinicians", y_axis_title = "Number of clinicians infected") +
+    make_clinician_plot(plotdata, "B. Clinicians",
+                        y_axis_title = "Cumulative #clinicians infected") +
     facet_grid(. ~ infection_group)
 )
 

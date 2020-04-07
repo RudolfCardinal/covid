@@ -22,8 +22,15 @@ spread_modelling.py
 
 ===============================================================================
 
+Purpose
+=======
+
 Models the spread of an infection such as SARS-CoV-2 coronavirus (COVID-19
 disease) under different models of community mental health care.
+
+
+Notes
+=====
 
 Time units are days.
 
@@ -64,11 +71,41 @@ Re transmission risk (infectivity):
 
   ... see https://web.stanford.edu/~jhj1/teachingdocs/Jones-on-R0.pdf
 
+
+Changelog
+=========
+
+- First internal circulation 2020-04-02.
+
+- 2020-04-02: Bugfix: Exposure to family members was at the patient rate.
+  Fixed.
+
+- 2020-04-07:
+
+  - Speedup.
+  
+  - Daily, not cumulative, values in the "per-day" output.
+  
+  - Record clinician-patient contact numbers (for when clinicians get sick,
+    as below).
+    
+  - Symptomatic clinicians don't see patients or meet each other.
+  
+  - Top level restructed slightly.
+
+
+To do
+=====
+
+- *** Merge households (n_patients_per_household)
+
+
 """  # noqa
 
 import argparse
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
+import contextlib
 import cProfile
 import csv
 from enum import Enum
@@ -77,10 +114,12 @@ import logging
 import multiprocessing
 import os
 import random
-from typing import Any, Callable, Dict, TextIO, Iterable, List, Optional
+from random import random as random_random
+from timeit import default_timer, Timer
+from typing import (Any, Callable, Dict, Generator, Iterable, List, Optional,
+                    TextIO, Tuple)
 
 from cardinal_pythonlib.logs import main_only_quicksetup_rootlogger
-from cardinal_pythonlib.randomness import coin as cpl_coin
 import numpy as np
 
 log = logging.getLogger(__name__)
@@ -117,10 +156,11 @@ class RunMode(Enum):
     """
     Mode of running the program.
     """
-    DEBUG_SINGLE = "debug_single"
+    DEBUG_SHORT = "debug_short"
     DEBUG_PROFILE = "debug_profile"
     DEBUG_CHECK_N_ITERATIONS = "debug_check_n_iterations"
-    FULL = "full"
+    EXP1 = "experiment_1"
+    EXP2 = "experiment_2"
 
 
 class InfectionStatus(Enum):
@@ -131,6 +171,10 @@ class InfectionStatus(Enum):
     EXPOSED = "exposed"
     INFECTIOUS = "infectious"
     RECOVERED = "recovered"
+
+
+class NoClinicians(Exception):
+    pass
 
 
 # =============================================================================
@@ -144,11 +188,18 @@ def numpy_coin(p: float) -> bool:
     return bool(np.random.binomial(n=1, p=p))
 
 
+def fast_coin(p: float) -> bool:
+    """
+    Faster version of :func`cardinal_pythonlib.randomness.coin` (q.v.).
+    """
+    return random_random() < p
+
+
 # Choose our coin-flip function
 if NUMPY_COIN:
     coin = numpy_coin
 else:
-    coin = cpl_coin
+    coin = fast_coin
 
 
 def do_cprofile(func: FuncType) -> FuncType:
@@ -164,7 +215,8 @@ def do_cprofile(func: FuncType) -> FuncType:
             profile.disable()
             return result
         finally:
-            profile.print_stats(sort="cumulative")
+            # profile.print_stats(sort="cumulative")
+            profile.print_stats(sort="tottime")  # best thing to optimize?
     return profiled_func
 
 
@@ -195,6 +247,19 @@ def product_dict(**kwargs: Iterable) -> Iterable[Dict]:
         yield dict(zip(keys, instance))
 
 
+@contextlib.contextmanager
+def dummy_context_mgr():
+    """
+    We're using Python 3.6 which doesn't have contextlib.nullcontext.
+    Hence this.
+
+    - https://stackoverflow.com/questions/27803059/conditional-with-statement-in-python
+    - See also
+      https://stackoverflow.com/questions/893333/multiple-variables-in-a-with-statement
+    """  # noqa
+    yield None
+
+
 # =============================================================================
 # Config
 # =============================================================================
@@ -219,7 +284,8 @@ class Config(object):
             appointment_type: Appointment = Appointment.CLINIC,
             clinicians_meet_each_other: bool = False,
             n_clinicians: int = 20,
-            n_patients_per_clinician_per_day: int = 5,
+            n_patients_per_day: int = 100,
+            max_n_patients_per_clinician_per_day: int = 10,
             variable_n_family: bool = True,  # needless reduction in power
             mean_n_family_members_per_patient: float = 1.37,
             n_days: int = 60,
@@ -228,7 +294,7 @@ class Config(object):
             prop_day_clinician_patient_interaction: float = 1 / 24,
             prop_day_family_interaction: float = 8 / 24,
             prop_day_clinician_clinician_interaction: float = 1 / 24,
-            prop_day_clinician_family_intervention: float = 0.2 / 24,
+            prop_day_clinician_family_interaction: float = 0.2 / 24,
             n_random_social_contacts_per_day: int = 0,
             prop_day_random_social_contact: float = 0.1 / 24,
             # Simulation
@@ -284,9 +350,12 @@ class Config(object):
                 Do clinicians in this team meet each other daily?
             n_clinicians:
                 Number of clinicians in the team.
-            n_patients_per_clinician_per_day:
-                Number of (different) patients seen by each clinician each day,
-                assumed to be all new patients each day.
+            n_patients_per_day:
+                Number of (different) patients to be seen each day, assumed to
+                be all new patients each day.
+            max_n_patients_per_clinician_per_day:
+                Maximum clinician capacity when fully stretched covering
+                sick colleagues.
             variable_n_family:
                 Allow the number of family members to vary?
                 Warning: increases variability, so loses power.
@@ -311,7 +380,7 @@ class Config(object):
                 Proportion of a day for a patient-family member encounter.
             prop_day_clinician_clinician_interaction:
                 Proportion of a day for a clinician-clinician encounter.
-            prop_day_clinician_family_intervention:
+            prop_day_clinician_family_interaction:
                 Proportion of a day for a clinician-family member encounter
                 (on home visits only).
             n_random_social_contacts_per_day:
@@ -343,40 +412,31 @@ class Config(object):
 
         assert behavioural_infectivity_multiple_if_symptomatic >= 0.0
 
-        self.pathogenicity_p_symptoms_if_infected = \
-            pathogenicity_p_symptoms_if_infected
-        self.biological_asymptomatic_infectivity_factor = \
-            biological_asymptomatic_infectivity_factor
-        self.t_infected_to_symptoms_incubation_period = \
-            t_infected_to_symptoms_incubation_period
-        self.t_infected_to_infectious = t_infected_to_infectious
+        self.behavioural_infectivity_multiple_if_symptomatic = behavioural_infectivity_multiple_if_symptomatic  # noqa
+        self.biological_asymptomatic_infectivity_factor = biological_asymptomatic_infectivity_factor  # noqa
         self.infectious_for_t = infectious_for_t
-        self.symptoms_for_t = symptoms_for_t
         self.p_infect_for_full_day_exposure = p_infect_for_full_day_exposure
-        self.behavioural_infectivity_multiple_if_symptomatic = \
-            behavioural_infectivity_multiple_if_symptomatic
+        self.pathogenicity_p_symptoms_if_infected = pathogenicity_p_symptoms_if_infected  # noqa
+        self.symptoms_for_t = symptoms_for_t
+        self.t_infected_to_infectious = t_infected_to_infectious
+        self.t_infected_to_symptoms_incubation_period = t_infected_to_symptoms_incubation_period  # noqa
 
         self.appointment_type = appointment_type
         self.clinicians_meet_each_other = clinicians_meet_each_other
+        self.max_n_patients_per_clinician_per_day = max_n_patients_per_clinician_per_day  # noqa
+        self.mean_n_family_members_per_patient = mean_n_family_members_per_patient  # noqa
         self.n_clinicians = n_clinicians
-        self.n_patients_per_clinician_per_day = \
-            n_patients_per_clinician_per_day
-        self.variable_n_family = variable_n_family
-        self.mean_n_family_members_per_patient = \
-            mean_n_family_members_per_patient
         self.n_days = n_days
+        self.n_patients_per_day = n_patients_per_day  # noqa
+        self.n_random_social_contacts_per_day = n_random_social_contacts_per_day  # noqa
         self.p_baseline_infected = p_baseline_infected
         self.p_external_infection_per_day = p_external_infection_per_day
-        self.prop_day_clinician_patient_interaction = \
-            prop_day_clinician_patient_interaction
+        self.prop_day_clinician_clinician_interaction = prop_day_clinician_clinician_interaction  # noqa
+        self.prop_day_clinician_family_interaction = prop_day_clinician_family_interaction  # noqa
+        self.prop_day_clinician_patient_interaction = prop_day_clinician_patient_interaction  # noqa
         self.prop_day_family_interaction = prop_day_family_interaction
-        self.prop_day_clinician_clinician_interaction = \
-            prop_day_clinician_clinician_interaction
-        self.prop_day_clinician_family_intervention = \
-            prop_day_clinician_family_intervention
-        self.n_random_social_contacts_per_day = \
-            n_random_social_contacts_per_day
         self.prop_day_random_social_contact = prop_day_random_social_contact
+        self.variable_n_family = variable_n_family
 
         self.iteration = iteration
 
@@ -426,7 +486,7 @@ class Metaconfig(object):
                      for var in self.varnames()]
         paramlist.append(f"iteration={config.iteration}")
         params = ", ".join(paramlist)
-        log.info(f"Simulating: {params}...")
+        log.info(f"Simulating: {params} ...")
 
     def csv_header_row(self) -> List[str]:
         """
@@ -451,10 +511,15 @@ class Metaconfig(object):
         """
         pop = Population(config=config)
         self.announce_sim(config)
+        start = default_timer()
         pop.simulate()
+        end = default_timer()
+        log.debug(f"Sim took {end - start} s")
         return pop
 
-    def simulate_all(self, totals_file: TextIO, daily_file: TextIO) -> None:
+    def _simulate_all_main(self,
+                           totals_file: TextIO,
+                           daily_file: Optional[TextIO]) -> None:
         """
         Simulate everything and save the results.
 
@@ -463,42 +528,85 @@ class Metaconfig(object):
                 output file for whole-run totals
             daily_file:
                 output file for day-by-day totals
-        """
+
+        Concurrency performance notes
+        =============================
+
+        - Threading doesn't help much (probably because of the Python global
+          interpreter lock). Use processes; much quicker.
+
+        - With ProcessPoolExecutor, models of use include:
+
+          .. code-block:: python
+
+            with ProcessPoolExecutor(...) as executor:
+                futures = executor.map(function, iterable)
+            # ... will complete all? And then
+            for result in futures:
+                pass
+
+          .. code-block:: python
+
+            with ProcessPoolExecutor(...) as executor:
+                for result in executor.map(function, iterable):
+                    # ... also waits for many to complete before we get
+                    #     here -- but not all? Seems to operate batch-wise.
+                    pass
+
+        - Profiling shows that most time is spent in ``{method 'acquire' of
+          '_thread.lock' objects}``.
+
+        - Going faster:
+
+          - https://stackoverflow.com/questions/42074501/python-concurrent-futures-processpoolexecutor-performance-of-submit-vs-map
+          - You can't 
+          - You can't pickle open file objects, or csv.writer objects, and
+            therefore you can't use them as arguments to
+            ProcessPoolExecutor map() calls.
+
+        """  # noqa
+        use_daily_file = bool(daily_file)
+
         writer_totals = csv.writer(totals_file)
-        writer_people = csv.writer(daily_file)
+        if use_daily_file:
+            writer_daily = csv.writer(daily_file)
+        else:
+            writer_daily = None  # for linter; won't be used
 
         control_header_row = self.csv_header_row()
         writer_totals.writerow(control_header_row +
                                Population.totals_csv_header_row())
-        writer_people.writerow(control_header_row +
-                               Population.daily_csv_header_row())
-
-        # - Threading doesn't help much (probably because of the Python global
-        #   interpreter lock). Use processes; much quicker.
-        #
-        # - Models of use include:
-        #
-        #       with ProcessPoolExecutor(...) as executor:
-        #           results = executor.map(function, iterable)
-        #       # ... will complete all? And then
-        #       for result in results:
-        #           pass
-        #
-        #       with ProcessPoolExecutor(...) as executor:
-        #           for result in executor.map(function, iterable):
-        #               # ... also waits for many to complete before we get
-        #               #     here -- but not all? Seems to operate batch-wise.
-        #               pass
+        if use_daily_file:
+            writer_daily.writerow(control_header_row +
+                                  Population.daily_csv_header_row())
 
         n_cpus = multiprocessing.cpu_count()
         log.info(f"Using {n_cpus} processes")
+
         with ProcessPoolExecutor(max_workers=n_cpus) as executor:
             for pop in executor.map(self.simulate_one, self.gen_configs()):
+                log.debug("Processing result")
                 control_data_row = self.csv_data_row(pop.config)
                 writer_totals.writerow(control_data_row +
                                        pop.totals_csv_data_row())
-                for r in pop.daily_csv_data_rows():
-                    writer_people.writerow(control_data_row + r)
+                if use_daily_file:
+                    for r in pop.daily_csv_data_rows():
+                        writer_daily.writerow(control_data_row + r)
+
+    def simulate_all(self,
+                     totals_filename: str,
+                     daily_filename: str = None) -> None:
+        """
+        Simulate everything and save the results.
+        As for :meth:`_simulate_all_main` but using filenames.
+        """
+        log.info(f"Writing totals to: {totals_filename}")
+        if daily_filename:
+            log.info(f"Writing daily results to: {daily_filename}")
+        with open(totals_filename, "wt") as ft:
+            with (open(daily_filename, "wt") if daily_filename
+                  else dummy_context_mgr()) as fd:
+                self._simulate_all_main(totals_file=ft, daily_file=fd)
 
 
 # =============================================================================
@@ -509,16 +617,30 @@ class Person(object):
     """
     Represents a person.
     """
-    def __init__(self, name: str, config: Config):
+    def __init__(self, name: str, config: Config,
+                 is_clinician: bool = False,
+                 is_patient: bool = False,
+                 is_family: bool = False):
         """
         Args:
             name:
                 Identifying name.
             config:
                 :class:`Config` object.
+            is_clinician:
+                Is this person a clinician?
+            is_patient:
+                Is this person a patient?
+            is_family:
+                Is this person a family member of a patient?
 
         """  # noqa
         self.name = name
+        self.is_clinician = is_clinician
+        self.is_patient = is_patient
+        self.is_family = is_family
+
+        assert sum((is_clinician, is_patient, is_family)) == 1
 
         # Copy for speed (saves self.config.X indirection each time):
         self.biological_asymptomatic_infectivity_factor = \
@@ -535,6 +657,11 @@ class Person(object):
 
         self._symptomatic_if_infected = coin(
             config.pathogenicity_p_symptoms_if_infected)
+        self._t_infected_to_no_longer_infectious = (
+            # Precalculate for speed
+            self.t_infected_to_infectious +
+            self.infectious_for_t
+        )
 
         self.infected = False  # infected at some point?
         self.infected_at = None  # type: Optional[float]
@@ -553,13 +680,12 @@ class Person(object):
         """
         SEIR status.
         """
-        if self.susceptible():
-            return InfectionStatus.SUSCEPTIBLE
         t_since_infected = self.time_since_infected(now)
+        if t_since_infected is None:  # not infected
+            return InfectionStatus.SUSCEPTIBLE
         if t_since_infected < self.t_infected_to_infectious:
             return InfectionStatus.EXPOSED
-        if t_since_infected < (self.t_infected_to_infectious +
-                               self.infectious_for_t):
+        if t_since_infected < self._t_infected_to_no_longer_infectious:
             return InfectionStatus.INFECTIOUS
         return InfectionStatus.RECOVERED
 
@@ -596,14 +722,15 @@ class Person(object):
         if not self._symptomatic_if_infected:
             return False
         t_since_infected = self.time_since_infected(now)
-        if t_since_infected is None:
+        if t_since_infected is None:  # not infected
             return False
         if t_since_infected < self.t_infected_to_symptoms_incubation_period:
             return False
-        return (
-            t_since_infected - self.t_infected_to_symptoms_incubation_period <
-            self.symptoms_for_t
+        t_since_symptom_onset = (
+            t_since_infected -
+            self.t_infected_to_symptoms_incubation_period
         )
+        return t_since_symptom_onset < self.symptoms_for_t
 
     def infectivity(self, now: float, prop_full_day: float) -> float:
         """
@@ -633,6 +760,7 @@ class Person(object):
             p_infect *= self.biological_asymptomatic_infectivity_factor
         return p_infect
 
+    # noinspection PyUnusedLocal
     def infect(self, now: float, source: "Person" = None) -> None:
         """
         Infect this patient.
@@ -643,15 +771,15 @@ class Person(object):
         """
         if self.infected:
             return
-        log.debug(f"{self.name} infected at {now} by {source}")
+        # log.debug(f"{self.name} infected at {now} by {source}")
         self.infected = True
         self.infected_at = now
 
     def expose_to(self, other: "Person", now: float,
-                  prop_full_day: float) -> None:
+                  prop_full_day: float) -> bool:
         """
-        Exposes ``self`` to ``other``, which may result in infection.
-        Repeat the other way round for a full interaction.
+        Exposes ``self`` to ``other``, which may result in infection of
+        ``self``. Repeat the other way round for a full interaction.
 
         Args:
             other:
@@ -661,17 +789,23 @@ class Person(object):
             prop_full_day:
                 The fraction of a full day for which exposure occurred (on
                 the basis that longer exposure increases risk).
+
+        Returns:
+            bool: was ``self`` infected?
         """
         if not other.infected:
-            return  # much quicker to skip in this situation
+            return False  # much quicker to skip in this situation
         infectivity = other.infectivity(now, prop_full_day)
         if infectivity <= 0.0:
-            return
+            return False
         if coin(infectivity):
             self.infect(now, other)
+            return True
+        else:
+            return False
 
     def mutually_expose(self, other: "Person", now: float,
-                        prop_full_day: float) -> None:
+                        prop_full_day: float) -> Tuple[bool, bool]:
         """
         Expose ``self`` to ``other``, and ``other`` to ``self``.
 
@@ -683,9 +817,13 @@ class Person(object):
             prop_full_day:
                 The fraction of a full day for which exposure occurred (on
                 the basis that longer exposure increases risk).
+
+        Returns:
+            tuple: ``self_infected, other_infected``
         """
-        self.expose_to(other, now, prop_full_day)
-        other.expose_to(self, now, prop_full_day)
+        self_infected = self.expose_to(other, now, prop_full_day)
+        other_infected = other.expose_to(self, now, prop_full_day)
+        return self_infected, other_infected
 
 
 # =============================================================================
@@ -695,6 +833,8 @@ class Person(object):
 class Population(object):
     """
     Represents the population being studied, and their interactions.
+
+    The main data-recording class.
     """
     def __init__(self, config: Config) -> None:
         """
@@ -704,22 +844,27 @@ class Population(object):
         """
         self.config = config
 
-        self.n_patients_per_clinician = \
-            config.n_patients_per_clinician_per_day * config.n_days
-        self.n_patients = config.n_clinicians * self.n_patients_per_clinician
-
+        # Create clinicians
         self.clinicians = [
-            Person(name=f"Clinician_{i + 1}", config=config)
+            Person(name=f"Clinician_{i + 1}", config=config,
+                   is_clinician=True)
             for i in range(self.config.n_clinicians)
         ]
-        self.family = []  # type: List[Person]
+
+        # Create patients
+        self.n_patients = config.n_patients_per_day * config.n_days
         self.patients = [
-            Person(name=f"Patient_{i + 1}", config=config)
+            Person(name=f"Patient_{i + 1}", config=config,
+                   is_patient=True)
             for i in range(self.n_patients)
         ]
+
+        # List of all families:
+        self.households = []  # type: List[List[Person]]
         # Map of patient to family members:
         self.p2f = {}  # type: Dict[Person, List[Person]]
         self._n_people = len(self.clinicians) + len(self.patients)
+        self.all_nonpatient_family_members = []  # type: List[Person]
 
         for pnum, p in enumerate(self.patients, start=1):
             if config.variable_n_family:
@@ -730,25 +875,26 @@ class Population(object):
             family_members = []  # type: List[Person]
             for i in range(n_family):
                 f = Person(name=f"Family_{i + 1}_of_patient_{pnum}",
-                           config=config)
+                           config=config, is_family=True)
                 family_members.append(f)
-                self.family.append(f)
+                self.all_nonpatient_family_members.append(f)
             self.p2f[p] = family_members
+            self.households.append([p] + family_members)
             self._n_people += len(family_members)
+
+        # Logging. Keys are day number.
+        self.daily_contacts = defaultdict(int)  # type: Dict[int, int]
+        self.daily_clinician_patient_contacts = defaultdict(int)  # type: Dict[int, int]  # noqa
+        self._n_people_infected_on = defaultdict(int)  # type: Dict[int, int]
+        self._n_clinicians_infected_on = defaultdict(int)  # type: Dict[int, int]  # noqa
+        self._n_patients_infected_on = defaultdict(int)  # type: Dict[int, int]
+        self._n_family_infected_on = defaultdict(int)  # type: Dict[int, int]
 
         # Baseline infection
         for p in self.gen_people():
             if coin(self.config.p_baseline_infected):
                 p.infect(0)
-
-        # Logging. Keys are day number.
-        # This is redundancy but important for speed.
-        self.total_n_contacts = 0
-        self.daily_contacts = defaultdict(int)  # type: Dict[int, int]
-        self._n_people_infected_by = defaultdict(int)  # type: Dict[int, int]
-        self._n_clinicians_infected_by = defaultdict(int)  # type: Dict[int, int]  # noqa
-        self._n_patients_infected_by = defaultdict(int)  # type: Dict[int, int]
-        self._n_family_infected_by = defaultdict(int)  # type: Dict[int, int]
+                self.log_infection(p, 0)
 
     def gen_people(self) -> Iterable[Person]:
         """
@@ -758,8 +904,39 @@ class Population(object):
             yield p
         for p in self.patients:
             yield p
-        for p in self.family:
+        for p in self.all_nonpatient_family_members:
             yield p
+
+    def gen_available_clinicians_cyclically(
+            self,
+            now: float,
+            max_patients_per_clinician: int) -> Generator[Person, None, None]:
+        """
+        Generates asymptomatic clinicians available for work today.
+        Assumes that each clinician is used to see a patient, and notes that.
+        Cycles through clinicians infinitely or until they are all overworked.
+        Raises ``NoClinicians`` when it runs out.
+
+        Args:
+            now:
+                time now
+            max_patients_per_clinician:
+                maximum number of patients (uses) for each clinician
+        """
+        clinicians = [c for c in self.clinicians if not c.symptomatic(now)]
+        if not clinicians:
+            raise NoClinicians("All sick")
+        n_patients_seen_per_clinician = defaultdict(int)  # type: Dict[Person, int]  # noqa
+        while True:
+            found_one = False
+            for c in clinicians:
+                if n_patients_seen_per_clinician[c] >= max_patients_per_clinician:  # noqa
+                    continue
+                found_one = True
+                n_patients_seen_per_clinician[c] += 1
+                yield c
+            if not found_one:
+                raise NoClinicians("All clinicians at max patients per day")
 
     def person_at_idx(self, idx: int) -> Person:
         """
@@ -776,94 +953,119 @@ class Population(object):
             return self.patients[idx]
         idx -= len(self.patients)
 
-        assert 0 <= idx < len(self.family)
-        return self.family[idx]
+        assert 0 <= idx < len(self.all_nonpatient_family_members)
+        return self.all_nonpatient_family_members[idx]
 
-    def patients_for_clinician(self, clinician: Person,
-                               today: int) -> Iterable[Person]:
+    def patients_for_today(self, today: int) -> Iterable[Person]:
         """
-        Yield patients to be seen today by a given clinician.
+        Yield patients needing to be seen today.
         """
-        assert clinician in self.clinicians
         assert 1 <= today <= self.config.n_days
         today_zb = today - 1
-        clinician_idx = self.clinicians.index(clinician)
-        first_patient_idx = (
-            clinician_idx * self.n_patients_per_clinician +
-            today_zb * self.config.n_patients_per_clinician_per_day
-        )
-        for patient_idx in range(
-                first_patient_idx,
-                first_patient_idx +
-                self.config.n_patients_per_clinician_per_day):
+        nppd = self.config.n_patients_per_day
+        first_patient_idx = today_zb * nppd
+        for patient_idx in range(first_patient_idx,
+                                 first_patient_idx + nppd):
             yield self.patients[patient_idx]
+
+    def log_infection(self, p: Person, today: int) -> None:
+        """
+        Log the infection of a person.
+        """
+        self._n_people_infected_on[today] += 1
+        if p.is_clinician:
+            self._n_clinicians_infected_on[today] += 1
+        if p.is_patient:
+            self._n_patients_infected_on[today] += 1
+        if p.is_family:
+            self._n_family_infected_on[today] += 1
 
     def simulate_day(self, today: int) -> None:
         """
         Simulate a specific day's interactions.
         """
-        def expose(p1_: Person, p2_: Person, prop_day: float) -> None:
+        def expose_pair(p1_: Person, p2_: Person, prop_day: float) -> None:
             """
             Expose two people to each other.
-            """
-            assert p1_ is not p2_
-            self.total_n_contacts += 1
-            self.daily_contacts[today] += 1
-            p1_.mutually_expose(p2_, now, prop_day)
 
-        log.debug(f"Simulating day {today}...")
+            - Record infections now, for speed.
+            - Record details of a contact (except clinician-patient contact
+              logging, performed below).
+            """
+            # assert p1_ is not p2_
+            self.daily_contacts[today] += 1
+            p1_infected, p2_infected = p1_.mutually_expose(p2_, now, prop_day)
+            if p1_infected:
+                self.log_infection(p1_, today)
+            if p2_infected:
+                self.log_infection(p2_, today)
+
+        # log.debug(f"Simulating day {today}...")
         now = float(today)
 
         # Simulate infection from outside our group:
         p_external_infection = self.config.p_external_infection_per_day
         for p in self.gen_people():
+            # p.susceptible() is faster than coin()
             if p.susceptible() and coin(p_external_infection):
                 p.infect(now)
+                self.log_infection(p, today)
 
         # Household interactions:
         prop_day_family = self.config.prop_day_family_interaction
-        for p in self.patients:
-            # Patients interact with their family:
-            family = self.p2f[p]
-            for f in family:
-                expose(p, f, prop_day_family)
-            # Family interact with each other
-            for f1, f2 in combinations(family, r=2):  # type: Person, Person
-                expose(f1, f2, prop_day_family)
+        for household in self.households:  # patients and family
+            # Every person interacts with every other
+            for p1, p2 in combinations(household, r=2):  # type: Person, Person
+                expose_pair(p1, p2, prop_day_family)
 
         appointment_type = self.config.appointment_type
         if appointment_type in [Appointment.HOME_VISIT, Appointment.CLINIC]:
             # Clinicians meet their patients:
             prop_day_c_p = self.config.prop_day_clinician_patient_interaction
-            for c in self.clinicians:
-                for p in self.patients_for_clinician(c, today):
-                    expose(c, p, prop_day_c_p)
+            prop_day_c_f = self.config.prop_day_clinician_family_interaction
+            clingen = self.gen_available_clinicians_cyclically(
+                now, self.config.max_n_patients_per_clinician_per_day)
+            try:
+                for p in self.patients_for_today(today):
+                    c = next(clingen)
+                    expose_pair(c, p, prop_day_c_p)
+                    self.daily_clinician_patient_contacts[today] += 1
                     # Clinicians might meet the family:
                     if appointment_type == Appointment.HOME_VISIT:
                         family = self.p2f[p]
                         for f in family:
-                            expose(c, f, prop_day_c_p)
+                            expose_pair(c, f, prop_day_c_f)
+            except NoClinicians:
+                log.warning(f"Out of clinicians on day {today}")
         elif appointment_type == Appointment.REMOTE:
             # Nobody meets up
             pass
         else:
             raise ValueError("Bad appointment type")
 
-        # Clinicians may get together (e.g. share a base, meet up):
+        # Clinicians may get together (e.g. share a base, meet up),
+        # if they are asymptomatic.
         if self.config.clinicians_meet_each_other:
             prop_day_c_c = self.config.prop_day_clinician_clinician_interaction
-            for c1, c2 in combinations(self.clinicians, r=2):  # type: Person, Person  # noqa
-                expose(c1, c2, prop_day_c_c)
+            asymptomatic_clinicians = [c for c in self.clinicians
+                                       if not c.symptomatic(now)]
+            for c1, c2 in combinations(asymptomatic_clinicians, r=2):  # type: Person, Person  # noqa
+                expose_pair(c1, c2, prop_day_c_c)
 
         # Random contacts within the population?
         if self.config.n_random_social_contacts_per_day > 0:
+            # -----------------------------------------------------------------
+            # NOT USED -- IGNORE
+            # If resurrected: does not account for self-isolation of those who
+            # are symptomatic (not even clinicians).
+            # -----------------------------------------------------------------
             prop_day_random = self.config.prop_day_random_social_contact
             n_random_contacts = min(
                 self.config.n_random_social_contacts_per_day,
                 self.n_people()
             )
-            log.debug(f"Random social contacts with "
-                      f"{n_random_contacts} people each")
+            # log.debug(f"Random social contacts with "
+            #           f"{n_random_contacts} people each")
             for p1 in self.gen_people():
                 p2idxlist = np.random.choice(
                     a=self.n_people(),  # will use range from 0 to this minus 1
@@ -874,32 +1076,9 @@ class Population(object):
                     p2 = self.person_at_idx(p2idx)
                     if p2 is p1:
                         continue
-                    expose(p1, p2, prop_day_random)
+                    expose_pair(p1, p2, prop_day_random)
 
-        # Done. Tot up the day's totals for efficiency later.
-        self._update_day_totals(today)
-        log.debug(f"... day {today} had {self.daily_contacts[today]} contacts")
-
-    def _update_day_totals(self, today: int) -> None:
-        """
-        Faster to calculate this day by day and with a single iteration.
-        """
-        self._n_patients_infected_by[today] = 0
-        self._n_clinicians_infected_by[today] = 0
-        self._n_patients_infected_by[today] = 0
-        self._n_family_infected_by[today] = 0
-        for p in self.clinicians:
-            if p.infected:
-                self._n_people_infected_by[today] += 1
-                self._n_clinicians_infected_by[today] += 1
-        for p in self.patients:
-            if p.infected:
-                self._n_people_infected_by[today] += 1
-                self._n_patients_infected_by[today] += 1
-        for p in self.family:
-            if p.infected:
-                self._n_people_infected_by[today] += 1
-                self._n_family_infected_by[today] += 1
+        # log.debug(f"... day {today} had {self.daily_contacts[today]} contacts")  # noqa
 
     def simulate(self) -> None:
         """
@@ -912,7 +1091,8 @@ class Population(object):
         """
         The number of people who have been infected at some point.
         """
-        return sum(1 for p in self.gen_people() if p.infected)
+        # return sum(1 for p in self.gen_people() if p.infected)
+        return sum(v for v in self._n_people_infected_on.values())
 
     def n_people(self) -> int:
         """
@@ -924,7 +1104,8 @@ class Population(object):
         """
         The number of patients who have been infected at some point.
         """
-        return sum(1 for p in self.patients if p.infected)
+        # return sum(1 for p in self.patients if p.infected)
+        return sum(v for v in self._n_patients_infected_on.values())
 
     def n_clinicians_infected(self) -> int:
         """
@@ -936,13 +1117,26 @@ class Population(object):
         """
         The total number of family members of patients.
         """
-        return len(self.family)
+        return len(self.all_nonpatient_family_members)
 
     def n_family_infected(self) -> int:
         """
         The number of family members who have been infected.
         """
-        return sum(1 for f in self.family if f.infected)
+        # return sum(1 for f in self.all_nonpatient_family_members if f.infected)  # noqa
+        return sum(v for v in self._n_family_infected_on.values())
+
+    def total_n_contacts(self) -> int:
+        """
+        The total number of person-to-person interactions.
+        """
+        return sum(v for v in self.daily_contacts.values())
+
+    def n_clinician_patient_contacts(self) -> int:
+        """
+        The total number of clinician-patient interactions.
+        """
+        return sum(v for v in self.daily_clinician_patient_contacts.values())
     
     @staticmethod
     def totals_csv_header_row() -> List[str]:
@@ -954,7 +1148,7 @@ class Population(object):
             "n_clinicians", "n_clinicians_infected",
             "n_family", "n_family_infected",
             "n_people", "n_people_infected",
-            "n_contacts",
+            "n_contacts", "n_clinician_patient_contacts",
         ]
     
     def totals_csv_data_row(self) -> List[Any]:
@@ -966,7 +1160,7 @@ class Population(object):
             self.config.n_clinicians, self.n_clinicians_infected(),
             self.n_family(), self.n_family_infected(),
             self.n_people(), self.n_people_infected(),
-            self.total_n_contacts,
+            self.total_n_contacts(), self.n_clinician_patient_contacts(),
         ]
 
     @staticmethod
@@ -981,113 +1175,122 @@ class Population(object):
             "n_patients_infected",
             "n_family_infected",
             "n_contacts",
+            "n_clinician_patient_contacts",
         ]
 
     def daily_csv_data_rows(self) -> Iterable[List[Any]]:
         """
         CSV data row for the "people" output.
+        Includes 0, the day before simulation starts.
         """
-        for day in range(1, self.config.n_days + 1):
+        for day in range(0, self.config.n_days + 1):
             yield [
                 day,
-                self.n_people_infected_by(day),
-                self.n_clinicians_infected_by(day),
-                self.n_patients_infected_by(day),
-                self.n_family_infected_by(day),
-                self.n_contacts_by(day),
+                self._n_people_infected_on[day],
+                self._n_clinicians_infected_on[day],
+                self._n_patients_infected_on[day],
+                self._n_family_infected_on[day],
+                self.daily_contacts[day],
+                self.daily_clinician_patient_contacts[day],
             ]
-
-    def n_people_infected_by(self, day: int) -> int:
-        """
-        Number of people infected by a particular point in time.
-        """
-        return self._n_people_infected_by[day]
-
-    def n_clinicians_infected_by(self, day: int) -> int:
-        """
-        Number of clinicians infected by a particular point in time.
-        """
-        return self._n_clinicians_infected_by[day]
-
-    def n_patients_infected_by(self, day: int) -> int:
-        """
-        Number of people infected by a particular point in time.
-        """
-        return self._n_patients_infected_by[day]
-
-    def n_family_infected_by(self, day: int) -> int:
-        """
-        Number of people infected by a particular point in time.
-        """
-        return self._n_family_infected_by[day]
-
-    def n_contacts_by(self, last_day: int, first_day: int = 1) -> int:
-        """
-        Number of contacts up to and including ``day``.
-        """
-        assert first_day <= last_day
-        return sum(self.daily_contacts[d]
-                   for d in range(first_day, last_day + 1))
 
 
 # =============================================================================
 # Simulation framework
 # =============================================================================
 
-def simulate_all(filename_totals: str,
-                 filename_daily: str,
-                 runmode: RunMode) -> None:
+def test_profile_sim(n_iterations: int) -> None:
     """
+    Profile. There's little point in profiling the top-level functions, since
+    when the parallel processing component starts, we don't see the functions
+    being called. Hence this.
+    """
+    mc = Metaconfig(
+        n_iterations=n_iterations,
+        appointment_type=[Appointment.HOME_VISIT],
+        clinicians_meet_each_other=[True],
+        behavioural_infectivity_multiple_if_symptomatic=[0.1],
+        p_baseline_infected=[0.05],
+        p_external_infection_per_day=[0.01],
+    )
+    for config in mc.gen_configs():
+        mc.simulate_one(config)
+
+
+def test_check_n_iterations(totals_filename: str,
+                            daily_filename: str) -> None:
+    """
+    Check that the default number of iterations is sensible.
+
+    Args:
+        totals_filename:
+            output filename for whole-run totals
+        daily_filename:
+            output filename for day-by-day details
+    """
+    mc = Metaconfig(
+        n_iterations=N_ITERATIONS,
+        appointment_type=[Appointment.HOME_VISIT],
+        clinicians_meet_each_other=[True],
+        behavioural_infectivity_multiple_if_symptomatic=[0.1],
+        p_baseline_infected=[0.01],
+        p_external_infection_per_day=[0.0],
+    )
+    mc.simulate_all(totals_filename=totals_filename,
+                    daily_filename=daily_filename)
+
+
+def experiment_1(totals_filename: str,
+                 daily_filename: str,
+                 n_iterations: int = N_ITERATIONS) -> None:
+    """
+    Experiment 1 (main experiment).
     Simulate our interactions and save the results.
 
     Args:
-        filename_totals:
+        totals_filename:
             output filename for whole-run totals
-        filename_daily:
+        daily_filename:
             output filename for day-by-day details
-        runmode:
-            Method of running the program.
-            number of iterations to run
+        n_iterations:
+            number of iterations
     """
-    if runmode in [RunMode.DEBUG_SINGLE, RunMode.DEBUG_PROFILE]:
-        n_iterations = 1 if runmode == RunMode.DEBUG_SINGLE else 24
-        mc = Metaconfig(
-            n_iterations=n_iterations,
-            appointment_type=[Appointment.HOME_VISIT],
-            clinicians_meet_each_other=[True],
-            behavioural_infectivity_multiple_if_symptomatic=[0.1],
-            p_baseline_infected=[0.05],
-            p_external_infection_per_day=[0.01],
-        )
-    elif runmode == RunMode.DEBUG_CHECK_N_ITERATIONS:
-        mc = Metaconfig(
-            n_iterations=N_ITERATIONS,
-            appointment_type=[Appointment.HOME_VISIT],
-            clinicians_meet_each_other=[True],
-            behavioural_infectivity_multiple_if_symptomatic=[0.1],
-            p_baseline_infected=[0.01],
-            p_external_infection_per_day=[0.0],
-        )
-    elif runmode == RunMode.FULL:
-        # ---------------------------------------------------------------------
-        # MAIN EXPERIMENTAL SETTINGS
-        # ---------------------------------------------------------------------
-        mc = Metaconfig(
-            n_iterations=N_ITERATIONS,
-            appointment_type=[x for x in Appointment],
-            # ... can do list(Appointment) but the type checker complains
-            clinicians_meet_each_other=[True, False],
-            behavioural_infectivity_multiple_if_symptomatic=[0.1, 1.0],
-            p_baseline_infected=[0.01, 0.05],
-            p_external_infection_per_day=[0.0, 0.02],
-        )
-    else:
-        raise ValueError(f"Unknown runmode: {runmode!r}")
+    # -------------------------------------------------------------------------
+    # MAIN EXPERIMENTAL SETTINGS
+    # -------------------------------------------------------------------------
+    mc = Metaconfig(
+        n_iterations=n_iterations,
+        appointment_type=[x for x in Appointment],
+        # ... can do list(Appointment) but the type checker complains
+        clinicians_meet_each_other=[True, False],
+        behavioural_infectivity_multiple_if_symptomatic=[0.1, 1.0],
+        p_baseline_infected=[0.01, 0.05],
+        p_external_infection_per_day=[0.0, 0.02],
+    )
+    mc.simulate_all(totals_filename=totals_filename,
+                    daily_filename=daily_filename)
 
-    log.info(f"Writing totals to: {filename_totals}")
-    log.info(f"Writing daily results to: {filename_daily}")
-    with open(filename_totals, "wt") as ft, open(filename_daily, "wt") as fd:
-        mc.simulate_all(totals_file=ft, daily_file=fd)
+
+def experiment_2(totals_filename: str) -> None:
+    """
+    An additional test, relating to "hubs" or connectedness in the population
+    and the effect of clinician-clinician interactions then.
+
+    Args:
+        totals_filename:
+            output filename for whole-run totals
+    """
+    mc = Metaconfig(
+        n_iterations=N_ITERATIONS,
+        appointment_type=[Appointment.HOME_VISIT],
+        clinicians_meet_each_other=[True, False],
+        behavioural_infectivity_multiple_if_symptomatic=[1.0],
+        p_baseline_infected=[0.01],
+        p_external_infection_per_day=[0.0],
+
+        # XXX_amalgamate_families
+    )
+    mc.simulate_all(totals_filename=totals_filename)
 
 
 # =============================================================================
@@ -1107,12 +1310,12 @@ def selftest() -> None:
     log.warning("Testing infection model")
     cfg = Config()
     cfg.pathogenicity_p_symptoms_if_infected = 1.0
-    p1 = Person("Test_person_1_symptomatic", cfg)
+    p1 = Person("Test_person_1_symptomatic", cfg, is_patient=True)
     cfg.pathogenicity_p_symptoms_if_infected = 0.0
-    p2 = Person("Test_person2_asymptomatic", cfg)
+    p2 = Person("Test_person2_asymptomatic", cfg, is_patient=True)
     for p in [p1, p2]:
         log.info(f"Person: {p}")
-        for now in range(-5, 30 + 1):
+        for now in range(-3, 20 + 1):
             if now == 0:
                 p.infect(now)
             print(
@@ -1123,6 +1326,13 @@ def selftest() -> None:
                 f"infectivity for 24h = {p.infectivity(now, 1.0)}, "
                 f"status = {p.status_at(now)}"
             )
+
+    log.warning("Speed-testing functions")
+    n_timeit = 10000
+    t = Timer(lambda: coin(0.5))
+    log.info(f" coin(0.5): {t.timeit(number=n_timeit)}")
+    t = Timer(lambda: p.susceptible())
+    log.info(f" p.susceptible(): {t.timeit(number=n_timeit)}")
 
 
 # =============================================================================
@@ -1139,15 +1349,21 @@ def main() -> None:
     parser.add_argument(
         "--outfile_totals", type=str,
         default=os.path.join(DEFAULT_OUTPUT_DIR, "disease_spread_totals.csv"),
-        help="Seed for random number generator"
+        help="Main output file for totals"
     )
     parser.add_argument(
         "--outfile_daily", type=str,
         default=os.path.join(DEFAULT_OUTPUT_DIR, "disease_spread_daily.csv"),
-        help="Seed for random number generator"
+        help="Main output file for daily results"
     )
     parser.add_argument(
-        "--runmode", type=str, default=RunMode.FULL.value,
+        "--outfile_exp2_totals", type=str,
+        default=os.path.join(DEFAULT_OUTPUT_DIR,
+                             "disease_spread_exp2_totals.csv"),
+        help="Experiment 2: output file for totals"
+    )
+    parser.add_argument(
+        "--runmode", type=str, default=RunMode.EXP1.value,
         choices=[x.value for x in RunMode],
         help="Method of running the program"
     )
@@ -1190,19 +1406,26 @@ def main() -> None:
     random.seed(seed)
     np.random.seed(seed)
 
-    # Run mode
+    # Do something useful
     runmode = RunMode(args.runmode)
-
-    # Profile?
-    if runmode == RunMode.DEBUG_PROFILE:
-        runfunc = do_cprofile(simulate_all)
+    if runmode == RunMode.DEBUG_SHORT:
+        experiment_1(totals_filename=args.outfile_totals,
+                     daily_filename=args.outfile_daily,
+                     n_iterations=2)
+    elif runmode == RunMode.DEBUG_PROFILE:
+        do_cprofile(test_profile_sim)(n_iterations=8)
+    elif runmode == RunMode.DEBUG_CHECK_N_ITERATIONS:
+        test_check_n_iterations(totals_filename=args.outfile_totals,
+                                daily_filename=args.outfile_daily)
+    elif runmode == RunMode.EXP1:
+        experiment_1(totals_filename=args.outfile_totals,
+                     daily_filename=args.outfile_daily)
+    elif runmode == RunMode.EXP2:
+        experiment_2(totals_filename=args.outfile_totals)
     else:
-        runfunc = simulate_all
+        raise ValueError(f"Unknown runmode: {runmode!r}")
 
-    # Go
-    runfunc(filename_totals=args.outfile_totals,
-            filename_daily=args.outfile_daily,
-            runmode=RunMode(args.runmode))
+    log.info("Done.")
 
 
 if __name__ == "__main__":
