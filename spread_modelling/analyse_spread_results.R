@@ -1,5 +1,111 @@
 #!/usr/bin/env Rscript
 # By Rudolf Cardinal, March 2020. GPL 3+ licence; see LICENSE.txt.
+#
+# PLOTTING
+#
+# One choice is of plotting on a log scale (allowing all conditions to be
+# shown) or having separate plots on a linear scale. The log scale is better
+# overall, and also allows faceting.
+# Another choice is whether to plot raw numbers on a log scale (1, 10, 100,
+# 1000) or log10 numbers (1, 2, 3, 4) -- the former is clearer
+# presentationally.
+#
+# ANALYSIS
+#
+# Similarly: analyse untransformed values, log-transformed values as
+# log10(y + 1), or use a GLM with a log link function?
+#
+# The GLM with a log link function:
+#
+# - analyses mean(values) by exponentiating linear predictors
+# - The error distribution is flexibly defined and determined by the variance
+#   function. For example:
+#
+#       f <- gaussian()
+#       f$variance
+#
+# - see also
+#   https://www.theanalysisfactor.com/count-models-understanding-the-log-link-function/
+# - see also FENG, Changyong, Hongyue WANG, Naiji LU, Tian CHEN, Hua HE,
+#   Ying LU, and Xin M. TU. ‘Log-Transformation and Its Implications for Data
+#   Analysis’. Shanghai Archives of Psychiatry 26, no. 2 (April 2014): 105–9.
+#   https://doi.org/10.3969/j.issn.1002-0829.2014.02.009.
+# - see also
+#   https://statmath.wu.ac.at/courses/heather_turner/glmCourse_001.pdf
+# - https://stats.stackexchange.com/questions/47840/linear-model-with-log-transformed-response-vs-generalized-linear-model-with-log
+#
+# The LM:
+#
+# - analyses mean(log(values)) with linear predictors
+#
+# Analysis of deviance for GLM:
+#
+# - https://online.stat.psu.edu/stat504/node/157/
+# - http://www.bbk.ac.uk/ems/faculty/brooms/teaching/SMDA/SMDA-07.pdf
+
+DEMO_GLM_VS_LOGLINEAR <- '
+
+LOG_OFFSET <- 1
+e2totals[, n_patients_per_household_factor := as.factor(n_patients_per_household)]
+e1totals[, log10_clinicians_infected := log10(n_clinicians_infected + LOG_OFFSET)]
+e2totals[, n_clinicians_infected_plus1 := n_clinicians_infected + 1]
+options(contrasts = CONTRASTS_FOR_LEVEL_DIFFS)
+
+glm_model <- glm(
+    n_clinicians_infected_plus1 ~ n_patients_per_household_factor *
+                                  clinicians_meet_each_other,
+    data = e2totals, family = gaussian(link = "log")
+)
+print(glm_model)
+
+llm_model <- lm(
+    log10_clinicians_infected ~ n_patients_per_household_factor *
+                                clinicians_meet_each_other,
+    data = e2totals)
+print(llm_model)
+
+plain_lm_model <- lm(
+    n_clinicians_infected_plus1 ~ n_patients_per_household_factor *
+                                  clinicians_meet_each_other,
+    data = e2totals)
+print(plain_lm_model)
+
+e2totals[, glm_predicted := predict(glm_model, type = "response")]
+# ... must do type = "response" to get it into the right scale!
+# e2totals[, llm_predicted := predict(llm_model)]
+# ... fails, bizarrely! But this works:
+e2totals$llm_predicted <- predict(llm_model)
+e2totals[, ten_to_llm_predicted := 10 ^ llm_predicted]
+e2totals[, plain_lm_predicted := predict(plain_lm_model)]
+demoplot <- (
+    ggplot(e2totals,
+           aes(x = n_patients_per_household,
+               linetype = clinicians_meet_each_other)) +
+    geom_point(aes(y = n_clinicians_infected_plus1,
+                   colour = clinicians_meet_each_other),
+               position = "jitter", alpha = 0.1) +
+    scale_y_log10() +
+    geom_line(aes(y = plain_lm_predicted),
+              colour = "green", size = 3) +
+    geom_line(aes(y = ten_to_llm_predicted),
+              colour = "red", size = 0.5) +  # NB MISMATCH
+    geom_line(aes(y = glm_predicted),
+              colour = "blue", size = 0.5)  # matches plain linear prediction
+)
+print(demoplot)
+
+# Thus, the GLM with log link is the best one to use.
+# Then, what we really want is a Poisson/log-link GLM.
+
+'
+
+
+# =============================================================================
+# Warnings become errors
+# =============================================================================
+
+options(warn = 2)
+
 
 # =============================================================================
 # Libraries
@@ -16,6 +122,7 @@ library(patchwork)
 library(tidyverse)
 
 source("https://egret.psychol.cam.ac.uk/rlib/miscfile.R")
+source("https://egret.psychol.cam.ac.uk/rlib/misclang.R")
 source("https://egret.psychol.cam.ac.uk/rlib/miscstat.R")
 
 
@@ -24,12 +131,19 @@ source("https://egret.psychol.cam.ac.uk/rlib/miscstat.R")
 # =============================================================================
 
 THIS_DIR <- miscfile$current_script_directory()
-DATA_RESULTS_DIR <- file.path(THIS_DIR, "results")
+RESULTS_DIR <- file.path(THIS_DIR, "results")  # simulation results
+CACHE_DIR <- file.path(THIS_DIR, "cache")
+OUTPUT_DIR <- file.path(THIS_DIR, "output")  # R output
 
-TOTALS_FILENAME <- file.path(DATA_RESULTS_DIR, "disease_spread_totals.csv")
-DAILY_FILENAME <- file.path(DATA_RESULTS_DIR, "disease_spread_daily.csv")
-RESULTS_FILENAME <- file.path(DATA_RESULTS_DIR, "results.txt")
-FIGURE_FILENAME <- file.path(DATA_RESULTS_DIR, "figures.pdf")
+EXP1_TOTALS_FILENAME <- file.path(RESULTS_DIR, "exp1_totals.csv")
+EXP1_DAILY_FILENAME <- file.path(RESULTS_DIR, "exp1_daily.csv")
+EXP2_TOTALS_FILENAME <- file.path(RESULTS_DIR, "exp2_totals.csv")
+EXP1_TOTALS_CACHE_FILENAME <- file.path(CACHE_DIR, "exp1_totals.rds")
+EXP2_DAILY_CACHE_FILENAME <- file.path(CACHE_DIR, "exp1_daily.rds")
+EXP2_TOTALS_CACHE_FILENAME <- file.path(CACHE_DIR, "exp2_totals.rds")
+RESULTS_FILENAME <- file.path(OUTPUT_DIR, "results.txt")
+FIGURE_1_FILENAME <- file.path(OUTPUT_DIR, "figure_1.pdf")
+FIGURE_2_FILENAME <- file.path(OUTPUT_DIR, "figure_2.pdf")
 
 
 # =============================================================================
@@ -38,60 +152,70 @@ FIGURE_FILENAME <- file.path(DATA_RESULTS_DIR, "figures.pdf")
 
 # Ensure correct order of factor levels
 APPOINTMENT_TYPE_LEVELS <- c("remote", "clinic", "home_visit")
+APPOINTMENT_TYPE_LABELS <- c("Remote", "Patient only", "Household contact")
 COLOURS_APPOINTMENT_TYPES <- c("black", "blue", "red")
+LINETYPES_CLINICIANS_MEET <- c("dashed", "solid")
+SIZES_SX_BEHAV_EFFECT <- c(0.75, 1.5)
 BOOLEAN_LEVELS <- c("False", "True")
 
-# For log-transforming values that can be zero:
-LOG_OFFSET <- 1  # for log10(x + 1)
 
-if (!exists("totals")) {
-    cat(paste0("Loading data (1) from ", TOTALS_FILENAME, "\n"))
-    totals <- data.table(read.csv(TOTALS_FILENAME))
+get_totals <- function(filename) {
+    cat(paste0("Loading totals data from ", filename, "\n"))
+    e1totals <- data.table(read.csv(filename))
 
-    cat("Transforming data (1)...\n")
+    cat("Transforming totals data...\n")
 
-    totals[, appointment_type := factor(appointment_type,
-                                        levels = APPOINTMENT_TYPE_LEVELS)]
-    totals[, clinicians_meet_each_other := factor(clinicians_meet_each_other,
-                                                  levels = BOOLEAN_LEVELS)]
+    e1totals[, appointment_type := factor(appointment_type,
+                                          levels = APPOINTMENT_TYPE_LEVELS)]
+    e1totals[, clinicians_meet_each_other := factor(clinicians_meet_each_other,
+                                                    levels = BOOLEAN_LEVELS)]
     # Shorter name for behavioural_infectivity_multiple_if_symptomatic:
-    totals[, sx_behav_effect := as.factor(
-        behavioural_infectivity_multiple_if_symptomatic)]
-    totals[, behavioural_infectivity_multiple_if_symptomatic := NULL]
-    totals[, p_baseline_infected := as.factor(p_baseline_infected)]
-    totals[, p_external_infection_per_day := as.factor(
-        p_external_infection_per_day)]
+    e1totals[, sx_behav_effect :=
+        as.factor(behavioural_infectivity_multiple_if_symptomatic)]
+    e1totals[, behavioural_infectivity_multiple_if_symptomatic := NULL]
+    e1totals[, p_baseline_infected := as.factor(p_baseline_infected)]
+    e1totals[, p_external_infection_per_day :=
+        as.factor(p_external_infection_per_day)]
 
     # Proportions:
-    totals[, prop_people_infected := n_people_infected / n_people]
-    totals[, prop_clinicians_infected := n_clinicians_infected / n_clinicians]
-    totals[, prop_patients_infected := n_patients_infected / n_patients]
-    totals[, prop_family_infected := n_family_infected / n_family]
+    e1totals[, prop_people_infected := n_people_infected / n_people]
+    e1totals[, prop_clinicians_infected := n_clinicians_infected / n_clinicians]
+    e1totals[, prop_patients_infected := n_patients_infected / n_patients]
+    e1totals[, prop_family_infected := n_family_infected / n_family]
 
-    # Logs:
-    totals[, log10_people_infected := log10(n_people_infected + LOG_OFFSET)]
-    totals[, log10_clinicians_infected := log10(n_clinicians_infected + LOG_OFFSET)]
+    return(e1totals)
 }
 
-if (!exists("daily")) {
-    cat(paste0("Loading data (2) from ", DAILY_FILENAME, "\n"))
-    daily <- data.table(read.csv(DAILY_FILENAME))
 
-    cat("Transforming data (2)...\n")
+get_exp1_totals <- function() {
+    return(get_totals(EXP1_TOTALS_FILENAME))
+}
 
-    daily[, appointment_type := factor(appointment_type,
-                                       levels = APPOINTMENT_TYPE_LEVELS)]
-    daily[, clinicians_meet_each_other := factor(clinicians_meet_each_other,
-                                                 levels = BOOLEAN_LEVELS)]
+
+get_exp2_totals <- function() {
+    return(get_totals(EXP2_TOTALS_FILENAME))
+}
+
+
+get_daily <- function(filename) {
+    cat(paste0("Loading daily data from ", filename, "\n"))
+    e1daily <- data.table(read.csv(filename))
+
+    cat("Transforming daily data...\n")
+
+    e1daily[, appointment_type := factor(appointment_type,
+                                         levels = APPOINTMENT_TYPE_LEVELS)]
+    e1daily[, clinicians_meet_each_other := factor(clinicians_meet_each_other,
+                                                   levels = BOOLEAN_LEVELS)]
     # Shorter name for behavioural_infectivity_multiple_if_symptomatic:
-    daily[, sx_behav_effect := as.factor(
-        behavioural_infectivity_multiple_if_symptomatic)]
-    daily[, behavioural_infectivity_multiple_if_symptomatic := NULL]
-    daily[, p_baseline_infected := as.factor(p_baseline_infected)]
-    daily[, p_external_infection_per_day := as.factor(
-        p_external_infection_per_day)]
+    e1daily[, sx_behav_effect :=
+        as.factor(behavioural_infectivity_multiple_if_symptomatic)]
+    e1daily[, behavioural_infectivity_multiple_if_symptomatic := NULL]
+    e1daily[, p_baseline_infected := as.factor(p_baseline_infected)]
+    e1daily[, p_external_infection_per_day :=
+        as.factor(p_external_infection_per_day)]
 
-    setkeyv(daily, c(
+    setkeyv(e1daily, c(
         # Control settings
         "appointment_type",
         "clinicians_meet_each_other",
@@ -102,7 +226,7 @@ if (!exists("daily")) {
         "iteration",
         "day"
     ))
-    daily <- daily %>%
+    e1daily <- e1daily %>%
         group_by(
             appointment_type,
             clinicians_meet_each_other,
@@ -119,14 +243,35 @@ if (!exists("daily")) {
         ) %>%
         as.data.table()
 
-    daily[, group := paste0(
-        "AT", appointment_type, "_",
-        "CM", as.integer(clinicians_meet_each_other), "_",
-        "SIMS", sx_behav_effect, "_",
-        "BL", p_baseline_infected, "_",
-        "EXT", p_external_infection_per_day
+    e1daily[, group := paste0(
+        "AT-", appointment_type, "_",
+        "CM-", as.integer(clinicians_meet_each_other), "_",
+        "SIMS-", sx_behav_effect, "_",
+        "BL-", p_baseline_infected, "_",
+        "EXT-", p_external_infection_per_day
     )]
 
+    return(e1daily)
+}
+
+
+get_exp1_daily <- function() {
+    return(get_daily(EXP1_DAILY_FILENAME))
+}
+
+
+# Use an exists() check to save reloading from disk every time we re-source().
+if (!exists("e1totals")) {
+    e1totals <- misclang$load_rds_or_run_function(EXP1_TOTALS_CACHE_FILENAME,
+                                                  get_exp1_totals)
+}
+if (!exists("e2totals")) {
+    e1daily <- misclang$load_rds_or_run_function(EXP2_DAILY_CACHE_FILENAME,
+                                                 get_exp1_daily)
+}
+if (!exists("e2totals")) {
+    e2totals <- misclang$load_rds_or_run_function(EXP2_TOTALS_CACHE_FILENAME,
+                                                  get_exp2_totals)
 }
 
 
@@ -145,7 +290,6 @@ if (!exists("daily")) {
 # The number of infected clinicians can be 0, so we need an offset; see
 # LOG_OFFSET.
 
-PERFORM_ANALYSIS <- TRUE
 OUTPUT_COLWIDTH <- 120
 
 LINEBREAK_1 <- paste(c(rep("=", 79), "\n"), collapse="")
@@ -159,6 +303,8 @@ CONTRASTS_FOR_LEVEL_DIFFS <- c(unordered = "contr.treatment", ordered = "contr.p
 CONTRASTS_FOR_TYPE_III_SS <- c(unordered = "contr.sum", ordered = "contr.poly")
 # ... sum-to-zero contrasts, for type III sums of squares
 # ... see https://www.rdocumentation.org/packages/car/versions/3.0-7/topics/Anova
+# ... and http://egret.psychol.cam.ac.uk/statistics/R/anova.html
+# ... UNUSED; we will use type I with a fully balanced design
 
 
 write_title <- function(title, subtitle = FALSE,
@@ -186,273 +332,332 @@ write_output <- function(x, append = TRUE, filename = RESULTS_FILENAME)
 }
 
 
-write_lm_and_anova <- function(formula, data, append = TRUE,
-                               filename = RESULTS_FILENAME) {
+write_glm_and_anova <- function(formula, data, append = TRUE,
+                                family = poisson(link = "log"),
+                                filename = RESULTS_FILENAME) {
     old_contrasts <- getOption("contrasts")
     sink(filename, append = append)
 
     cat(LINEBREAK_2)
-    cat("\nLinear model [using contr.treatment] for:\n")
+    cat("\nGeneralized linear model with log link [using contr.treatment] for:\n")
     print(formula)
     options(contrasts = CONTRASTS_FOR_LEVEL_DIFFS)
-    print(lm(formula = formula, data = data))
+    model_for_coeffs <- glm(formula = formula, data = data, family = family)
+    print(model_for_coeffs)
 
-    cat("\nANOVA with type III sums of squares [using contr.sum] for:\n")
+    cat("\nANOVA with type III sums of squares of that model [redone using contr.sum] for:\n")
     print(formula)
     options(contrasts = CONTRASTS_FOR_TYPE_III_SS)
-    print(Anova(lm(formula = formula, data = data), type = "III"))
+    model_for_type_III <- glm(formula = formula, data = data, family = family)
+    print(car::Anova(model_for_type_III, type = "III"))
     cat(LINEBREAK_3)
+
+    # -------------------------------------------------------------------------
+    # Ways not to run this analysis:
+    # -------------------------------------------------------------------------
+
+    # print(car::Anova(model_for_coeffs, type = "III"))  # NB DIFFERENT; WRONG;
+    # based on model with wrong contrasts; see "Warnings" section in
+    # ?car::Anova.
+
+    # drop1(model_for_type_III, ~., test = "F")
+    # ... produces a warning with family = poisson()
+    #     ("F test assumes 'quasipoisson' family")
+
+    # -------------------------------------------------------------------------
+    # Alternative ways:
+    # -------------------------------------------------------------------------
+
+    # drop1(model_for_type_III, ~., test = "Chisq")
+
+    # -------------------------------------------------------------------------
+    # See also
+    # -------------------------------------------------------------------------
+
+    # https://stat.ethz.ch/pipermail/r-sig-mixed-models/2016q1/024465.html
+    # ... car::Anova() can be used for lme4::glmer() too, if the contrast
+    #     coding is set correctly when the model is created.
+    #     ... as, for lmer4 models, can lmerTest::anova().
+    #     ... see https://cran.r-project.org/web/packages/lme4/lme4.pdf
 
     sink()
     options(contrasts = old_contrasts)
 }
 
 
-if (PERFORM_ANALYSIS) {
-    cat("Performing analyses...\n")
+cat("Performing analyses...\n")
 
-    tmp_width <- getOption("width")
-    options(width = OUTPUT_COLWIDTH)
+tmp_width <- getOption("width")
+options(width = OUTPUT_COLWIDTH)
 
-    write_title("Summary", append = FALSE)
-    s1 <- totals %>%
-        group_by(
-            appointment_type,
-            clinicians_meet_each_other,
-            sx_behav_effect,
-            p_baseline_infected,
-            p_external_infection_per_day
-        ) %>%
-        summarise(
-            mean_prop_people_infected = mean(prop_people_infected),
-            mean_prop_clinicians_infected = mean(prop_clinicians_infected),
-            mean_prop_patients_infected = mean(prop_patients_infected),
-            mean_prop_family_infected = mean(prop_family_infected),
-            mean_n_contacts = mean(n_contacts)
-        ) %>%
-        as.data.table()
-    write_output(s1)
-    daily_long <- daily %>%
-        gather(key = who,
-               value = n_infected,
-               cum_n_people_infected,
-               cum_n_clinicians_infected,
-               cum_n_patients_infected,
-               cum_n_family_infected) %>%
-        mutate(
-            who = dplyr::recode(
-                who,
-                cum_n_people_infected = "people",
-                cum_n_clinicians_infected = "clinicians",
-                cum_n_patients_infected = "patients",
-                cum_n_family_infected = "family"
-            )
-        ) %>%
-        as.data.table()
+# -------------------------------------------------------------------------
+# Experiment 1
+# -------------------------------------------------------------------------
 
-    # These analyses don't take account of time (day), and just use final
-    # totals:
+write_title("Experiment 1", append = FALSE)
+write_title("Exp 1: Summary")
+s1 <- e1totals %>%
+    group_by(
+        appointment_type,
+        clinicians_meet_each_other,
+        sx_behav_effect,
+        p_baseline_infected,
+        p_external_infection_per_day
+    ) %>%
+    summarise(
+        mean_prop_people_infected = mean(prop_people_infected),
+        mean_prop_clinicians_infected = mean(prop_clinicians_infected),
+        mean_prop_patients_infected = mean(prop_patients_infected),
+        mean_prop_family_infected = mean(prop_family_infected),
+        mean_n_contacts = mean(n_contacts)
+    ) %>%
+    as.data.table()
+write_output(s1)
+daily_long <- e1daily %>%
+    gather(key = who,
+           value = n_infected,
+           cum_n_people_infected,
+           cum_n_clinicians_infected,
+           cum_n_patients_infected,
+           cum_n_family_infected) %>%
+    mutate(
+        who = dplyr::recode(
+            who,
+            cum_n_people_infected = "people",
+            cum_n_clinicians_infected = "clinicians",
+            cum_n_patients_infected = "patients",
+            cum_n_family_infected = "family"
+        )
+    ) %>%
+    as.data.table()
 
-    # -------------------------------------------------------------------------
-    # Whole population infections
-    # -------------------------------------------------------------------------
-    write_title("Whole population infection")
-    write_title("Whole population: full model", subtitle = TRUE)
-    write_lm_and_anova(
-        log10_people_infected ~
-            appointment_type *
-            clinicians_meet_each_other *
-            p_baseline_infected *
-            p_external_infection_per_day *
-            sx_behav_effect,
-        data = totals
-    )
-    write_title("Whole population: mean comparisons", subtitle = TRUE)
-    write_output(mean(totals[appointment_type == "remote", prop_people_infected]))
-    write_output(mean(totals[appointment_type == "clinic", prop_people_infected]))
-    write_output(mean(totals[appointment_type == "home_visit", prop_people_infected]))
-    write_output(
-        mean(totals[appointment_type == "home_visit", prop_people_infected]) -
-        mean(totals[appointment_type == "remote", prop_people_infected])
-    )
-    write_title(paste0(
-        "Whole population: highly simplified model ",
-        "(illustrates smaller 'bad' (+) effect of 'bad behaviour' ",
-        "(sx_behav_effect1) at 'bad infection rate' ",
-        "(p_external_infection_per_day0.02)", subtitle = TRUE))
-    write_lm_and_anova(
-        log10_people_infected ~
-            p_external_infection_per_day *
-            sx_behav_effect,
-        data = totals
-    )
+# These analyses don't take account of time (day), and just use final
+# e1totals:
 
-    # -------------------------------------------------------------------------
-    # Clinician infections
-    # -------------------------------------------------------------------------
-    write_title("Clinician infection")
-    write_lm_and_anova(
-        log10_clinicians_infected ~
-            appointment_type *
-            clinicians_meet_each_other *
-            p_baseline_infected *
-            p_external_infection_per_day *
-            sx_behav_effect,
-        data = totals
-    )
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Whole population infections
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+write_title("Exp 1: Whole population infection")
+write_title("Exp 1: Whole population: full model", subtitle = TRUE)
+write_glm_and_anova(
+    n_people_infected ~
+        appointment_type *
+        clinicians_meet_each_other *
+        p_baseline_infected *
+        p_external_infection_per_day *
+        sx_behav_effect,
+    data = e1totals
+)
+write_title("Exp 1: Whole population: mean comparisons", subtitle = TRUE)
+write_output(mean(e1totals[appointment_type == "remote", prop_people_infected]))
+write_output(mean(e1totals[appointment_type == "clinic", prop_people_infected]))
+write_output(mean(e1totals[appointment_type == "home_visit", prop_people_infected]))
+write_output(
+    mean(e1totals[appointment_type == "home_visit", prop_people_infected]) -
+    mean(e1totals[appointment_type == "remote", prop_people_infected])
+)
+write_title(paste0(
+    "Exp 1: Whole population: highly simplified model ",
+    "(illustrates smaller 'bad' (+) effect of 'bad behaviour' ",
+    "(sx_behav_effect1) at 'bad infection rate' ",
+    "(p_external_infection_per_day0.02)", subtitle = TRUE))
+write_glm_and_anova(
+    n_people_infected ~
+        p_external_infection_per_day *
+        sx_behav_effect,
+    data = e1totals
+)
 
-    write_title("Clinician infection: external infection == 0", subtitle = TRUE)
-    # Do appointment_type * clinicians_meet_each_other interactions persist
-    # in each "external infection" condition?
-    write_lm_and_anova(
-        log10_clinicians_infected ~
-            appointment_type *
-            clinicians_meet_each_other *
-            p_baseline_infected *
-            sx_behav_effect,
-        data = totals[p_external_infection_per_day == 0]
-    )
-    write_title("Clinician infection: external infection == 0.02", subtitle = TRUE)
-    write_lm_and_anova(
-        log10_clinicians_infected ~
-            appointment_type *
-            clinicians_meet_each_other *
-            p_baseline_infected *
-            sx_behav_effect,
-        data = totals[p_external_infection_per_day == 0.02]
-    )
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Clinician infections
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+write_title("Exp 1: Clinician infection")
+write_glm_and_anova(
+    n_clinicians_infected ~
+        appointment_type *
+        clinicians_meet_each_other *
+        p_baseline_infected *
+        p_external_infection_per_day *
+        sx_behav_effect,
+    data = e1totals
+)
 
-    # Effects of clinicians meeting up:
+write_title("Exp 1: Clinician infection: external infection == 0", subtitle = TRUE)
+# Do appointment_type * clinicians_meet_each_other interactions persist
+# in each "external infection" condition?
+write_glm_and_anova(
+    n_clinicians_infected ~
+        appointment_type *
+        clinicians_meet_each_other *
+        p_baseline_infected *
+        sx_behav_effect,
+    data = e1totals[p_external_infection_per_day == 0]
+)
+write_title("Exp 1: Clinician infection: external infection == 0.02", subtitle = TRUE)
+write_glm_and_anova(
+    n_clinicians_infected ~
+        appointment_type *
+        clinicians_meet_each_other *
+        p_baseline_infected *
+        sx_behav_effect,
+    data = e1totals[p_external_infection_per_day == 0.02]
+)
 
-    write_title("Clinician infection: clinicians meeting up", subtitle = TRUE)
-    meetups1 <- s1 %>%
-        select(
-            mean_prop_clinicians_infected,
-            appointment_type,
-            clinicians_meet_each_other,
-            p_baseline_infected,
-            p_external_infection_per_day,
-            sx_behav_effect
-        ) %>%
-        mutate(
-            p_baseline_infected := as.numeric(as.character(p_baseline_infected))
-        ) %>%
-        pivot_wider(
-            names_prefix = "clinicians_meet_",
-            names_from = clinicians_meet_each_other,
-            values_from = mean_prop_clinicians_infected
-        ) %>%
-        as.data.table()
-    meetups1[, no_meet_fraction_of_extra := (
-        (clinicians_meet_False - p_baseline_infected) /
-        (clinicians_meet_True - p_baseline_infected)
-    )]
-    meetups2 <- meetups1 %>%
-        group_by(appointment_type) %>%
-        summarise(mean_no_meet_fraction = mean(no_meet_fraction_of_extra)) %>%
-        as.data.table()
-    meetups3 <- meetups1 %>%
-        group_by(appointment_type, p_external_infection_per_day) %>%
-        summarise(mean_no_meet_fraction = mean(no_meet_fraction_of_extra)) %>%
-        as.data.table()
-    # NB OK to use unweighted means like this, as all groups have equal sizes
-    # etc.
+# Effects of clinicians meeting up:
 
-    write_output(meetups1)
-    write_output(meetups2)
-    write_output(meetups3)
+write_title("Exp 1: Clinician infection: clinicians meeting up", subtitle = TRUE)
+meetups1 <- s1 %>%
+    select(
+        mean_prop_clinicians_infected,
+        appointment_type,
+        clinicians_meet_each_other,
+        p_baseline_infected,
+        p_external_infection_per_day,
+        sx_behav_effect
+    ) %>%
+    mutate(
+        p_baseline_infected := as.numeric(as.character(p_baseline_infected))
+    ) %>%
+    pivot_wider(
+        names_prefix = "clinicians_meet_",
+        names_from = clinicians_meet_each_other,
+        values_from = mean_prop_clinicians_infected
+    ) %>%
+    as.data.table()
+meetups1[, no_meet_fraction_of_extra := (
+    (clinicians_meet_False - p_baseline_infected) /
+    (clinicians_meet_True - p_baseline_infected)
+)]
+meetups2 <- meetups1 %>%
+    group_by(appointment_type) %>%
+    summarise(mean_no_meet_fraction = mean(no_meet_fraction_of_extra)) %>%
+    as.data.table()
+meetups3 <- meetups1 %>%
+    group_by(appointment_type, p_external_infection_per_day) %>%
+    summarise(mean_no_meet_fraction = mean(no_meet_fraction_of_extra)) %>%
+    as.data.table()
+# NB OK to use unweighted means like this, as all groups have equal sizes
+# etc.
 
-    # Effects of appointment type:
+write_output(meetups1)
+write_output(meetups2)
+write_output(meetups3)
 
-    write_title("Clinician infection: appointment types", subtitle = TRUE)
-    apptypes1 <- s1 %>%
-        select(
-            mean_prop_clinicians_infected,
-            appointment_type,
-            clinicians_meet_each_other,
-            p_baseline_infected,
-            p_external_infection_per_day,
-            sx_behav_effect
-        ) %>%
-        mutate(
-            p_baseline_infected := as.numeric(as.character(p_baseline_infected))
-        ) %>%
-        pivot_wider(
-            names_prefix = "apptype_",
-            names_from = appointment_type,
-            values_from = mean_prop_clinicians_infected
-        ) %>%
-        as.data.table()
-    apptypes1[, clinic_fraction_of_extra_vs_home_visit := (
-        (apptype_clinic - p_baseline_infected) /
-        (apptype_home_visit - p_baseline_infected)
-    )]
-    apptypes1[, remote_fraction_of_extra_vs_home_visit := (
-        (apptype_remote - p_baseline_infected) /
-        (apptype_home_visit - p_baseline_infected)
-    )]
-    apptypes2 <- apptypes1 %>%
-        group_by(p_external_infection_per_day) %>%
-        summarise(
-            mean_clinic_fraction_of_extra_vs_home_visit = mean(clinic_fraction_of_extra_vs_home_visit),
-            mean_remote_fraction_of_extra_vs_home_visit = mean(remote_fraction_of_extra_vs_home_visit),
-        ) %>%
-        as.data.table()
-    apptypes3 <- apptypes1 %>%
-        group_by(p_external_infection_per_day, clinicians_meet_each_other) %>%
-        summarise(
-            mean_clinic_fraction_of_extra_vs_home_visit = mean(clinic_fraction_of_extra_vs_home_visit),
-            mean_remote_fraction_of_extra_vs_home_visit = mean(remote_fraction_of_extra_vs_home_visit),
-        ) %>%
-        as.data.table()
+# Effects of appointment type:
 
-    write_output(apptypes1)
-    write_output(apptypes2)
-    write_output(apptypes3)
+write_title("Exp 1: Clinician infection: appointment types", subtitle = TRUE)
+apptypes1 <- s1 %>%
+    select(
+        mean_prop_clinicians_infected,
+        appointment_type,
+        clinicians_meet_each_other,
+        p_baseline_infected,
+        p_external_infection_per_day,
+        sx_behav_effect
+    ) %>%
+    mutate(
+        p_baseline_infected := as.numeric(as.character(p_baseline_infected))
+    ) %>%
+    pivot_wider(
+        names_prefix = "apptype_",
+        names_from = appointment_type,
+        values_from = mean_prop_clinicians_infected
+    ) %>%
+    as.data.table()
+apptypes1[, clinic_fraction_of_extra_vs_home_visit := (
+    (apptype_clinic - p_baseline_infected) /
+    (apptype_home_visit - p_baseline_infected)
+)]
+apptypes1[, remote_fraction_of_extra_vs_home_visit := (
+    (apptype_remote - p_baseline_infected) /
+    (apptype_home_visit - p_baseline_infected)
+)]
+apptypes2 <- apptypes1 %>%
+    group_by(p_external_infection_per_day) %>%
+    summarise(
+        mean_clinic_fraction_of_extra_vs_home_visit = mean(clinic_fraction_of_extra_vs_home_visit),
+        mean_remote_fraction_of_extra_vs_home_visit = mean(remote_fraction_of_extra_vs_home_visit),
+    ) %>%
+    as.data.table()
+apptypes3 <- apptypes1 %>%
+    group_by(p_external_infection_per_day, clinicians_meet_each_other) %>%
+    summarise(
+        mean_clinic_fraction_of_extra_vs_home_visit = mean(clinic_fraction_of_extra_vs_home_visit),
+        mean_remote_fraction_of_extra_vs_home_visit = mean(remote_fraction_of_extra_vs_home_visit),
+    ) %>%
+    as.data.table()
 
-    # Effects of sx_behav_effect:
+write_output(apptypes1)
+write_output(apptypes2)
+write_output(apptypes3)
 
-    write_title("Clinician infection: sx_behav_effect", subtitle = TRUE)
-    behav1 <- s1 %>%
-        select(
-            mean_prop_clinicians_infected,
-            appointment_type,
-            clinicians_meet_each_other,
-            p_baseline_infected,
-            p_external_infection_per_day,
-            sx_behav_effect
-        ) %>%
-        mutate(
-            p_baseline_infected := as.numeric(as.character(p_baseline_infected))
-        ) %>%
-        pivot_wider(
-            names_prefix = "behav_",
-            names_from = sx_behav_effect,
-            values_from = mean_prop_clinicians_infected
-        ) %>%
-        as.data.table()
-    behav1[, ppe_fraction_of_no_ppe := (
-        (behav_0.1 - p_baseline_infected) /
-        (behav_1 - p_baseline_infected)
-    )]
-    behav2 <- behav1 %>%
-        group_by(appointment_type) %>%
-        summarise(mean_ppe_fraction_of_no_ppe = mean(ppe_fraction_of_no_ppe)) %>%
-        as.data.table()
-    behav3 <- behav1 %>%
-        group_by(appointment_type, p_external_infection_per_day) %>%
-        summarise(mean_ppe_fraction_of_no_ppe = mean(ppe_fraction_of_no_ppe)) %>%
-        as.data.table()
+# Effects of sx_behav_effect:
 
-    write_output(behav1)
-    write_output(behav2)
-    write_output(behav3)
+write_title("Exp 1: Clinician infection: sx_behav_effect", subtitle = TRUE)
+behav1 <- s1 %>%
+    select(
+        mean_prop_clinicians_infected,
+        appointment_type,
+        clinicians_meet_each_other,
+        p_baseline_infected,
+        p_external_infection_per_day,
+        sx_behav_effect
+    ) %>%
+    mutate(
+        p_baseline_infected := as.numeric(as.character(p_baseline_infected))
+    ) %>%
+    pivot_wider(
+        names_prefix = "behav_",
+        names_from = sx_behav_effect,
+        values_from = mean_prop_clinicians_infected
+    ) %>%
+    as.data.table()
+behav1[, ppe_fraction_of_no_ppe := (
+    (behav_0.1 - p_baseline_infected) /
+    (behav_1 - p_baseline_infected)
+)]
+behav2 <- behav1 %>%
+    group_by(appointment_type) %>%
+    summarise(mean_ppe_fraction_of_no_ppe = mean(ppe_fraction_of_no_ppe)) %>%
+    as.data.table()
+behav3 <- behav1 %>%
+    group_by(appointment_type, p_external_infection_per_day) %>%
+    summarise(mean_ppe_fraction_of_no_ppe = mean(ppe_fraction_of_no_ppe)) %>%
+    as.data.table()
 
-    # Done
+write_output(behav1)
+write_output(behav2)
+write_output(behav3)
 
-    options(width = tmp_width)  # restore
-    rm(tmp_width)
-}
+# -------------------------------------------------------------------------
+# Experiment 2
+# -------------------------------------------------------------------------
+
+e2totals[, n_patients_per_household_factor :=
+    as.factor(n_patients_per_household)]
+
+write_title("Experiment 2")
+write_title("Exp 2: Whole population infection")
+write_glm_and_anova(
+    n_people_infected ~
+        clinicians_meet_each_other *
+        n_patients_per_household_factor,
+    data = e2totals
+)
+write_title("Exp 2: Clinician infection")
+write_glm_and_anova(
+    n_clinicians_infected ~
+        clinicians_meet_each_other *
+        n_patients_per_household_factor,
+    data = e2totals
+)
+
+# -------------------------------------------------------------------------
+# Done
+# -------------------------------------------------------------------------
+
+options(width = tmp_width)  # restore
+rm(tmp_width)
 
 
 # =============================================================================
@@ -463,8 +668,8 @@ COMMON_PLOT_ELEMENTS <- list(
     theme_bw(),
     scale_colour_manual(values = COLOURS_APPOINTMENT_TYPES),
     scale_fill_manual(values = COLOURS_APPOINTMENT_TYPES),
-    scale_linetype_manual(values = c("dotted", "solid")),
-    scale_size_manual(values = c(0.5, 2)),
+    scale_linetype_manual(values = LINETYPES_CLINICIANS_MEET),
+    scale_size_manual(values = SIZES_SX_BEHAV_EFFECT),
     theme(
         plot.title = element_text(face = "bold"),
         axis.title.y = element_text(face = "bold")
@@ -472,8 +677,8 @@ COMMON_PLOT_ELEMENTS <- list(
 )
 
 
-make_infected_plot <- function(data, y_varname, errbar_varname,
-                               title, y_axis_title = NULL) {
+make_infected_by_day_plot <- function(data, y_varname, errbar_varname,
+                                      title, y_axis_title = NULL) {
     yval <- data[[y_varname]]
     errbarval <- data[[errbar_varname]]
     p <- (
@@ -502,8 +707,8 @@ make_infected_plot <- function(data, y_varname, errbar_varname,
 }
 
 
-make_clinician_plot <- function(data, title, y_axis_title = NULL) {
-    return(make_infected_plot(
+make_clinician_by_day_plot <- function(data, title, y_axis_title = NULL) {
+    return(make_infected_by_day_plot(
         data = data,
         y_varname = "mean_cum_n_clinicians_infected",
         errbar_varname = "errbar_cum_n_clinicians_infected",
@@ -513,8 +718,8 @@ make_clinician_plot <- function(data, title, y_axis_title = NULL) {
 }
 
 
-make_people_plot <- function(data, title, y_axis_title = NULL) {
-    return(make_infected_plot(
+make_people_by_day_plot <- function(data, title, y_axis_title = NULL) {
+    return(make_infected_by_day_plot(
         data = data,
         y_varname = "mean_cum_n_people_infected",
         errbar_varname = "errbar_cum_n_people_infected",
@@ -524,7 +729,7 @@ make_people_plot <- function(data, title, y_axis_title = NULL) {
 }
 
 
-#make_contacts_plot <- function(data, title = "#Contacts") {
+#make_contacts_by_day_plot <- function(data, title = "#Contacts") {
 #    return(
 #        ggplot(
 #            data,
@@ -541,24 +746,80 @@ make_people_plot <- function(data, title, y_axis_title = NULL) {
 #}
 
 
+make_exp2_plot <- function(data, y_varname, errbar_varname,
+                           title, y_axis_title = NULL) {
+    yval <- data[[y_varname]]
+    errbarval <- data[[errbar_varname]]
+    xval <- sort(unique(data$n_patients_per_household))
+    p <- (
+        ggplot(data, aes(x = n_patients_per_household,
+                         group = clinicians_meet_each_other)) +
+        geom_ribbon(
+            aes(
+                ymin = yval - errbarval,
+                ymax = yval + errbarval
+            ),
+            alpha = 0.25
+        ) +
+        geom_line(aes_string(
+            y = y_varname,
+            linetype = "clinicians_meet_each_other"
+        )) +
+        geom_point(aes_string(y = y_varname)) +
+        COMMON_PLOT_ELEMENTS +
+        scale_x_continuous(
+            breaks = xval,
+            minor_breaks = NULL,
+            labels = xval
+        ) +
+        scale_y_log10() +
+        ylab(y_axis_title) +
+        xlab("#Patients per household") +
+        ggtitle(title)
+    )
+    return(p)
+}
+
+
+make_clinician_exp2_plot <- function(data, title, y_axis_title = NULL) {
+    return(make_exp2_plot(
+        data = data,
+        y_varname = "mean_n_clinicians_infected",
+        errbar_varname = "errbar_n_clinicians_infected",
+        title = title,
+        y_axis_title = y_axis_title
+    ))
+}
+
+
+make_people_exp2_plot <- function(data, title, y_axis_title = NULL) {
+    return(make_exp2_plot(
+        data = data,
+        y_varname = "mean_n_people_infected",
+        errbar_varname = "errbar_n_people_infected",
+        title = title,
+        y_axis_title = y_axis_title
+    ))
+}
+
+
 # =============================================================================
-# Plots
+# Figures
 # =============================================================================
-# One choice is of plotting on a log scale (allowing all conditions to be
-# shown) or having separate plots on a linear scale. The log scale is better
-# overall, and also allows faceting.
-# Another choice is whether to plot raw numbers on a log scale (1, 10, 100,
-# 1000) or log10 numbers (1, 2, 3, 4) -- the former is clearer
-# presentationally.
 
 cat("Making figures...\n")
 
 # Choose error bars:
 errbar_func <- miscstat$half_confidence_interval_t  # +/- 0.5 * 95% CI, i.e. 95% CI shown
 
-plotdata <- daily %>%
+# -----------------------------------------------------------------------------
+# Figure 1: Experiment 1
+# -----------------------------------------------------------------------------
+
+plotdata1 <- e1daily %>%
     group_by(
-        appointment_type, clinicians_meet_each_other,
+        appointment_type,
+        clinicians_meet_each_other,
         sx_behav_effect,
         p_baseline_infected,
         p_external_infection_per_day,
@@ -570,7 +831,6 @@ plotdata <- daily %>%
         errbar_cum_n_clinicians_infected = errbar_func(cum_n_clinicians_infected),
         mean_cum_n_people_infected = mean(cum_n_people_infected),
         errbar_cum_n_people_infected = errbar_func(cum_n_people_infected)
-        # mean_cum_n_contacts = mean(cum_n_contacts)
     ) %>%
     mutate(
         p_baseline_infected_numeric := as.numeric(as.character(p_baseline_infected)),
@@ -587,27 +847,79 @@ plotdata <- daily %>%
         )
     ) %>%
     as.data.table()
+# Do the following in a separate step, or you get the warning:
+# Error in mutate_impl(.data, dots, caller_env()) :
+#   (converted from warning) Unequal factor levels: coercing to character
+plotdata1 <- plotdata1 %>%
+    mutate(
+        infection_sxbehav_group := factor(
+            paste0(as.character(infection_group), "\n",
+                   "Sx behav. effect ", sx_behav_effect)
+        )
+    ) %>%
+    as.data.table()
+# More precise names for appointment type, for plotting:
+plotdata1[, appointment_type := factor(appointment_type,
+                                      levels = APPOINTMENT_TYPE_LEVELS,
+                                      labels = APPOINTMENT_TYPE_LABELS)]
 
-p1 <- (
-    make_people_plot(plotdata, "A. All people",
-                     y_axis_title = "Cumulative #people infected") +
-    facet_grid(. ~ infection_group)
+f1p1 <- (
+    make_people_by_day_plot(plotdata1, "A. All people",
+                            y_axis_title = "Cumulative #people infected") +
+    facet_grid(. ~ infection_sxbehav_group)
 )
-p2 <- (
-    make_clinician_plot(plotdata, "B. Clinicians",
-                        y_axis_title = "Cumulative #clinicians infected") +
-    facet_grid(. ~ infection_group)
+f1p2 <- (
+    make_clinician_by_day_plot(plotdata1, "B. Clinicians",
+                               y_axis_title = "Cumulative #clinicians infected") +
+    facet_grid(. ~ infection_sxbehav_group)
 )
 
-fig <- (
+fig1 <- (
     (
-        p1 |
-        p2
+        f1p1 /
+        f1p2
     ) +
     plot_layout(guides = "collect") &
     theme(legend.position = "bottom")
 )
-ggsave(FIGURE_FILENAME, fig, width = 40, height = 30, units = "cm")
+ggsave(FIGURE_1_FILENAME, fig1, width = 40, height = 40, units = "cm")
+
+
+# -----------------------------------------------------------------------------
+# Figure 2: Experiment 2
+# -----------------------------------------------------------------------------
+
+plotdata2 <- e2totals %>%
+    group_by(
+        clinicians_meet_each_other,
+        n_patients_per_household
+    ) %>%
+    summarise(
+        mean_n_clinicians_infected = mean(n_clinicians_infected),
+        errbar_n_clinicians_infected = errbar_func(n_clinicians_infected),
+        mean_n_people_infected = mean(n_people_infected),
+        errbar_n_people_infected = errbar_func(n_people_infected)
+    ) %>%
+    as.data.table()
+
+f2p1 <- (
+    make_people_exp2_plot(plotdata2, "A. All people",
+                          y_axis_title = "Total #people infected")
+)
+f2p2 <- (
+    make_clinician_exp2_plot(plotdata2, "B. Clinicians",
+                             y_axis_title = "Total #clinicians infected")
+)
+
+fig2 <- (
+    (
+        f2p1 |
+        f2p2
+    ) +
+    plot_layout(guides = "collect") &
+    theme(legend.position = "bottom")
+)
+ggsave(FIGURE_2_FILENAME, fig2, width = 20, height = 10, units = "cm")
 
 
 # =============================================================================
