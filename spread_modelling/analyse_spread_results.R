@@ -158,6 +158,10 @@ LINETYPES_CLINICIANS_MEET <- c("dashed", "solid")
 SIZES_SX_BEHAV_EFFECT <- c(0.75, 1.5)
 BOOLEAN_LEVELS <- c("False", "True")
 
+LABEL_SX_BEHAV_EFFECT <- "Sx behav. effect"
+LABEL_CLINICIANS_MEET <- "Clinicians meet each other"
+LABEL_APPOINTMENT_TYPE <- "Appointment type"
+
 
 get_totals <- function(filename) {
     cat(paste0("Loading totals data from ", filename, "\n"))
@@ -341,6 +345,7 @@ write_glm_and_anova <- function(formula, data, append = TRUE,
     cat(LINEBREAK_2)
     cat("\nGeneralized linear model with log link [using contr.treatment] for:\n")
     print(formula)
+    print(family)
     options(contrasts = CONTRASTS_FOR_LEVEL_DIFFS)
     model_for_coeffs <- glm(formula = formula, data = data, family = family)
     print(model_for_coeffs)
@@ -460,13 +465,14 @@ write_title(paste0(
     "Exp 1: Whole population: highly simplified model ",
     "(illustrates smaller 'bad' (+) effect of 'bad behaviour' ",
     "(sx_behav_effect1) at 'bad infection rate' ",
-    "(p_external_infection_per_day0.02)", subtitle = TRUE))
+    "(p_external_infection_per_day0.02)"), subtitle = TRUE)
 write_glm_and_anova(
     n_people_infected ~
         p_external_infection_per_day *
         sx_behav_effect,
     data = e1totals
 )
+
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Clinician infections
@@ -482,9 +488,59 @@ write_glm_and_anova(
     data = e1totals
 )
 
-write_title("Exp 1: Clinician infection: external infection == 0", subtitle = TRUE)
-# Do appointment_type * clinicians_meet_each_other interactions persist
-# in each "external infection" condition?
+# Effects of appointment type:
+
+write_title("Exp 1: Clinician infection: appointment types", subtitle = TRUE)
+apptypes1 <- s1 %>%
+    select(
+        mean_prop_clinicians_infected,
+        appointment_type,
+        clinicians_meet_each_other,
+        p_baseline_infected,
+        p_external_infection_per_day,
+        sx_behav_effect
+    ) %>%
+    mutate(
+        p_baseline_infected := as.numeric(as.character(p_baseline_infected))
+    ) %>%
+    pivot_wider(
+        names_prefix = "apptype_",
+        names_from = appointment_type,
+        values_from = mean_prop_clinicians_infected
+    ) %>%
+    as.data.table()
+apptypes1[, clinic_fraction_of_extra_vs_home_visit := (
+    (apptype_clinic - p_baseline_infected) /
+    (apptype_home_visit - p_baseline_infected)
+)]
+apptypes1[, remote_fraction_of_extra_vs_home_visit := (
+    (apptype_remote - p_baseline_infected) /
+    (apptype_home_visit - p_baseline_infected)
+)]
+apptypes2 <- apptypes1 %>%
+    group_by(p_external_infection_per_day) %>%
+    summarise(
+        mean_clinic_fraction_of_extra_vs_home_visit = mean(clinic_fraction_of_extra_vs_home_visit),
+        mean_remote_fraction_of_extra_vs_home_visit = mean(remote_fraction_of_extra_vs_home_visit),
+    ) %>%
+    as.data.table()
+apptypes3 <- apptypes1 %>%
+    group_by(p_external_infection_per_day, clinicians_meet_each_other) %>%
+    summarise(
+        mean_clinic_fraction_of_extra_vs_home_visit = mean(clinic_fraction_of_extra_vs_home_visit),
+        mean_remote_fraction_of_extra_vs_home_visit = mean(remote_fraction_of_extra_vs_home_visit),
+    ) %>%
+    as.data.table()
+
+write_output(apptypes1)
+write_output(apptypes2)
+write_output(apptypes3)
+
+write_title(paste0(
+    "Exp 1: Clinician infection: external infection == 0 ",
+    "(Do appointment_type * clinicians_meet_each_other interactions persist ",
+    "in each 'external infection' condition?)"
+), subtitle = TRUE)
 write_glm_and_anova(
     n_clinicians_infected ~
         appointment_type *
@@ -543,54 +599,6 @@ write_output(meetups1)
 write_output(meetups2)
 write_output(meetups3)
 
-# Effects of appointment type:
-
-write_title("Exp 1: Clinician infection: appointment types", subtitle = TRUE)
-apptypes1 <- s1 %>%
-    select(
-        mean_prop_clinicians_infected,
-        appointment_type,
-        clinicians_meet_each_other,
-        p_baseline_infected,
-        p_external_infection_per_day,
-        sx_behav_effect
-    ) %>%
-    mutate(
-        p_baseline_infected := as.numeric(as.character(p_baseline_infected))
-    ) %>%
-    pivot_wider(
-        names_prefix = "apptype_",
-        names_from = appointment_type,
-        values_from = mean_prop_clinicians_infected
-    ) %>%
-    as.data.table()
-apptypes1[, clinic_fraction_of_extra_vs_home_visit := (
-    (apptype_clinic - p_baseline_infected) /
-    (apptype_home_visit - p_baseline_infected)
-)]
-apptypes1[, remote_fraction_of_extra_vs_home_visit := (
-    (apptype_remote - p_baseline_infected) /
-    (apptype_home_visit - p_baseline_infected)
-)]
-apptypes2 <- apptypes1 %>%
-    group_by(p_external_infection_per_day) %>%
-    summarise(
-        mean_clinic_fraction_of_extra_vs_home_visit = mean(clinic_fraction_of_extra_vs_home_visit),
-        mean_remote_fraction_of_extra_vs_home_visit = mean(remote_fraction_of_extra_vs_home_visit),
-    ) %>%
-    as.data.table()
-apptypes3 <- apptypes1 %>%
-    group_by(p_external_infection_per_day, clinicians_meet_each_other) %>%
-    summarise(
-        mean_clinic_fraction_of_extra_vs_home_visit = mean(clinic_fraction_of_extra_vs_home_visit),
-        mean_remote_fraction_of_extra_vs_home_visit = mean(remote_fraction_of_extra_vs_home_visit),
-    ) %>%
-    as.data.table()
-
-write_output(apptypes1)
-write_output(apptypes2)
-write_output(apptypes3)
-
 # Effects of sx_behav_effect:
 
 write_title("Exp 1: Clinician infection: sx_behav_effect", subtitle = TRUE)
@@ -628,6 +636,48 @@ behav3 <- behav1 %>%
 write_output(behav1)
 write_output(behav2)
 write_output(behav3)
+
+write_title(paste0(
+    "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
+    "Effect of sx_behav_effect (and appointment_type) ",
+    "with external infection at 0%"), subtitle = TRUE)
+write_glm_and_anova(
+    n_clinicians_infected ~
+        appointment_type *
+        sx_behav_effect,
+    data = e1totals[p_external_infection_per_day == 0]
+)
+write_title(paste0(
+    "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
+    "Effect of sx_behav_effect (and appointment_type) ",
+    "with external infection at 2%"), subtitle = TRUE)
+write_glm_and_anova(
+    n_clinicians_infected ~
+        appointment_type *
+        sx_behav_effect,
+    data = e1totals[p_external_infection_per_day == 0.02]
+)
+write_title(paste0(
+    "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
+    "Effect of sx_behav_effect (and clinicians_meet_each_other) ",
+    "with external infection at 0%"), subtitle = TRUE)
+write_glm_and_anova(
+    n_clinicians_infected ~
+        clinicians_meet_each_other *
+        sx_behav_effect,
+    data = e1totals[p_external_infection_per_day == 0]
+)
+write_title(paste0(
+    "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
+    "Effect of sx_behav_effect (and clinicians_meet_each_other) ",
+    "with external infection at 2%"), subtitle = TRUE)
+write_glm_and_anova(
+    n_clinicians_infected ~
+        clinicians_meet_each_other *
+        sx_behav_effect,
+    data = e1totals[p_external_infection_per_day == 0.02]
+)
+
 
 # -------------------------------------------------------------------------
 # Experiment 2
@@ -697,6 +747,12 @@ make_infected_by_day_plot <- function(data, y_varname, errbar_varname,
             linetype = "clinicians_meet_each_other",
             size = "sx_behav_effect"
         )) +
+        labs(
+            colour = LABEL_APPOINTMENT_TYPE,
+            fill = LABEL_APPOINTMENT_TYPE,
+            linetype = LABEL_CLINICIANS_MEET,
+            size = LABEL_SX_BEHAV_EFFECT
+        ) +
         COMMON_PLOT_ELEMENTS +
         scale_y_log10() +
         ylab(y_axis_title) +
@@ -765,6 +821,9 @@ make_exp2_plot <- function(data, y_varname, errbar_varname,
             y = y_varname,
             linetype = "clinicians_meet_each_other"
         )) +
+        labs(
+            linetype = LABEL_CLINICIANS_MEET
+        ) +
         geom_point(aes_string(y = y_varname)) +
         COMMON_PLOT_ELEMENTS +
         scale_x_continuous(
@@ -854,7 +913,7 @@ plotdata1 <- plotdata1 %>%
     mutate(
         infection_sxbehav_group := factor(
             paste0(as.character(infection_group), "\n",
-                   "Sx behav. effect ", sx_behav_effect)
+                   LABEL_SX_BEHAV_EFFECT, " ", sx_behav_effect)
         )
     ) %>%
     as.data.table()
@@ -877,7 +936,8 @@ f1p2 <- (
 fig1 <- (
     (
         f1p1 /
-        f1p2
+        f1p2 +
+        plot_layout(heights = c(6, 12))
     ) +
     plot_layout(guides = "collect") &
     theme(legend.position = "bottom")
