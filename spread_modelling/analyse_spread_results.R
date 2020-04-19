@@ -142,17 +142,20 @@ EXP1_TOTALS_CACHE_FILENAME <- file.path(CACHE_DIR, "exp1_totals.rds")
 EXP2_DAILY_CACHE_FILENAME <- file.path(CACHE_DIR, "exp1_daily.rds")
 EXP2_TOTALS_CACHE_FILENAME <- file.path(CACHE_DIR, "exp2_totals.rds")
 RESULTS_FILENAME <- file.path(OUTPUT_DIR, "results.txt")
-FIGURE_1_FILENAME <- file.path(OUTPUT_DIR, "figure_1.pdf")
 FIGURE_2_FILENAME <- file.path(OUTPUT_DIR, "figure_2.pdf")
+FIGURE_3_FILENAME <- file.path(OUTPUT_DIR, "figure_3.pdf")
+FIGURE_4_FILENAME <- file.path(OUTPUT_DIR, "figure_4.pdf")
 
 
 # =============================================================================
-# Data in
+# Other constants
 # =============================================================================
 
 # Ensure correct order of factor levels
 APPOINTMENT_TYPE_LEVELS <- c("remote", "clinic", "home_visit")
-APPOINTMENT_TYPE_LABELS <- c("Remote", "Patient only", "Household contact")
+APPOINTMENT_TYPE_LABELS <- c("Remote visit (RV)",
+                             "Patient only (PO)",
+                             "Family contact (FC)")
 COLOURS_APPOINTMENT_TYPES <- c("black", "blue", "red")
 LINETYPES_CLINICIANS_MEET <- c("dashed", "solid")
 SIZES_SX_BEHAV_EFFECT <- c(0.75, 1.5)
@@ -162,6 +165,40 @@ LABEL_SX_BEHAV_EFFECT <- "Sx behav. effect"
 LABEL_CLINICIANS_MEET <- "Clinicians meet each other"
 LABEL_APPOINTMENT_TYPE <- "Appointment type"
 
+CORE_PLOT_ELEMENTS <- list(
+    theme_bw(),
+    theme(
+        plot.title = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold")
+    )
+)
+COMMON_PLOT_ELEMENTS <- c(CORE_PLOT_ELEMENTS, list(
+    scale_colour_manual(values = COLOURS_APPOINTMENT_TYPES),
+    scale_fill_manual(values = COLOURS_APPOINTMENT_TYPES),
+    scale_linetype_manual(values = LINETYPES_CLINICIANS_MEET),
+    scale_size_manual(values = SIZES_SX_BEHAV_EFFECT)
+))
+
+OUTPUT_COLWIDTH <- 120
+
+LINEBREAK_1 <- paste(c(rep("=", 79), "\n"), collapse="")
+LINEBREAK_2 <- paste(c(rep("-", 79), "\n"), collapse="")
+LINEBREAK_3 <- paste(c(rep("~", 79), "\n"), collapse="")
+
+CONTRASTS_FOR_LEVEL_DIFFS <- c(unordered = "contr.treatment", ordered = "contr.poly")
+# ... the default, from getOption("contrasts")
+# ... good level naming but not right contrasts for type III SS
+
+CONTRASTS_FOR_TYPE_III_SS <- c(unordered = "contr.sum", ordered = "contr.poly")
+# ... sum-to-zero contrasts, for type III sums of squares
+# ... see https://www.rdocumentation.org/packages/car/versions/3.0-7/topics/Anova
+# ... and http://egret.psychol.cam.ac.uk/statistics/R/anova.html
+# ... UNUSED; we will use type I with a fully balanced design
+
+
+# =============================================================================
+# Data in
+# =============================================================================
 
 get_totals <- function(filename) {
     cat(paste0("Loading totals data from ", filename, "\n"))
@@ -278,6 +315,8 @@ if (!exists("e2totals")) {
                                                   get_exp2_totals)
 }
 
+# stop("Loaded.")
+
 
 # =============================================================================
 # Analyses
@@ -293,23 +332,6 @@ if (!exists("e2totals")) {
 # i.e. deviation from multiplicative effects.
 # The number of infected clinicians can be 0, so we need an offset; see
 # LOG_OFFSET.
-
-OUTPUT_COLWIDTH <- 120
-
-LINEBREAK_1 <- paste(c(rep("=", 79), "\n"), collapse="")
-LINEBREAK_2 <- paste(c(rep("-", 79), "\n"), collapse="")
-LINEBREAK_3 <- paste(c(rep("~", 79), "\n"), collapse="")
-
-CONTRASTS_FOR_LEVEL_DIFFS <- c(unordered = "contr.treatment", ordered = "contr.poly")
-# ... the default, from getOption("contrasts")
-# ... good level naming but not right contrasts for type III SS
-
-CONTRASTS_FOR_TYPE_III_SS <- c(unordered = "contr.sum", ordered = "contr.poly")
-# ... sum-to-zero contrasts, for type III sums of squares
-# ... see https://www.rdocumentation.org/packages/car/versions/3.0-7/topics/Anova
-# ... and http://egret.psychol.cam.ac.uk/statistics/R/anova.html
-# ... UNUSED; we will use type I with a fully balanced design
-
 
 write_title <- function(title, subtitle = FALSE,
                         append = TRUE, filename = RESULTS_FILENAME)
@@ -690,6 +712,7 @@ write_title("Experiment 2")
 write_title("Exp 2: Whole population infection")
 write_glm_and_anova(
     n_people_infected ~
+        appointment_type *
         clinicians_meet_each_other *
         n_patients_per_household_factor,
     data = e2totals
@@ -697,6 +720,7 @@ write_glm_and_anova(
 write_title("Exp 2: Clinician infection")
 write_glm_and_anova(
     n_clinicians_infected ~
+        appointment_type *
         clinicians_meet_each_other *
         n_patients_per_household_factor,
     data = e2totals
@@ -713,19 +737,6 @@ rm(tmp_width)
 # =============================================================================
 # Plotting functions
 # =============================================================================
-
-COMMON_PLOT_ELEMENTS <- list(
-    theme_bw(),
-    scale_colour_manual(values = COLOURS_APPOINTMENT_TYPES),
-    scale_fill_manual(values = COLOURS_APPOINTMENT_TYPES),
-    scale_linetype_manual(values = LINETYPES_CLINICIANS_MEET),
-    scale_size_manual(values = SIZES_SX_BEHAV_EFFECT),
-    theme(
-        plot.title = element_text(face = "bold"),
-        axis.title.y = element_text(face = "bold")
-    )
-)
-
 
 make_infected_by_day_plot <- function(data, y_varname, errbar_varname,
                                       title, y_axis_title = NULL) {
@@ -809,7 +820,7 @@ make_exp2_plot <- function(data, y_varname, errbar_varname,
     xval <- sort(unique(data$n_patients_per_household))
     p <- (
         ggplot(data, aes(x = n_patients_per_household,
-                         group = clinicians_meet_each_other)) +
+                         group = group)) +
         geom_ribbon(
             aes(
                 ymin = yval - errbarval,
@@ -819,9 +830,11 @@ make_exp2_plot <- function(data, y_varname, errbar_varname,
         ) +
         geom_line(aes_string(
             y = y_varname,
+            colour = "appointment_type",
             linetype = "clinicians_meet_each_other"
         )) +
         labs(
+            colour = LABEL_APPOINTMENT_TYPE,
             linetype = LABEL_CLINICIANS_MEET
         ) +
         geom_point(aes_string(y = y_varname)) +
@@ -872,10 +885,10 @@ cat("Making figures...\n")
 errbar_func <- miscstat$half_confidence_interval_t  # +/- 0.5 * 95% CI, i.e. 95% CI shown
 
 # -----------------------------------------------------------------------------
-# Figure 1: Experiment 1
+# Figure 2: Experiment 1
 # -----------------------------------------------------------------------------
 
-plotdata1 <- e1daily %>%
+plotdata2 <- e1daily %>%
     group_by(
         appointment_type,
         clinicians_meet_each_other,
@@ -909,7 +922,7 @@ plotdata1 <- e1daily %>%
 # Do the following in a separate step, or you get the warning:
 # Error in mutate_impl(.data, dots, caller_env()) :
 #   (converted from warning) Unequal factor levels: coercing to character
-plotdata1 <- plotdata1 %>%
+plotdata2 <- plotdata2 %>%
     mutate(
         infection_sxbehav_group := factor(
             paste0(as.character(infection_group), "\n",
@@ -918,39 +931,40 @@ plotdata1 <- plotdata1 %>%
     ) %>%
     as.data.table()
 # More precise names for appointment type, for plotting:
-plotdata1[, appointment_type := factor(appointment_type,
+plotdata2[, appointment_type := factor(appointment_type,
                                       levels = APPOINTMENT_TYPE_LEVELS,
                                       labels = APPOINTMENT_TYPE_LABELS)]
 
-f1p1 <- (
-    make_people_by_day_plot(plotdata1, "A. All people",
+f2p1 <- (
+    make_people_by_day_plot(plotdata2, "A. All people",
                             y_axis_title = "Cumulative #people infected") +
     facet_grid(. ~ infection_sxbehav_group)
 )
-f1p2 <- (
-    make_clinician_by_day_plot(plotdata1, "B. Clinicians",
+f2p2 <- (
+    make_clinician_by_day_plot(plotdata2, "B. Clinicians",
                                y_axis_title = "Cumulative #clinicians infected") +
     facet_grid(. ~ infection_sxbehav_group)
 )
 
-fig1 <- (
+fig2 <- (
     (
-        f1p1 /
-        f1p2 +
+        f2p1 /
+        f2p2 +
         plot_layout(heights = c(6, 12))
     ) +
     plot_layout(guides = "collect") &
     theme(legend.position = "bottom")
 )
-ggsave(FIGURE_1_FILENAME, fig1, width = 40, height = 40, units = "cm")
+ggsave(FIGURE_2_FILENAME, fig2, width = 40, height = 40, units = "cm")
 
 
 # -----------------------------------------------------------------------------
-# Figure 2: Experiment 2
+# Figure 3: Experiment 2
 # -----------------------------------------------------------------------------
 
-plotdata2 <- e2totals %>%
+plotdata3 <- e2totals %>%
     group_by(
+        appointment_type,
         clinicians_meet_each_other,
         n_patients_per_household
     ) %>%
@@ -960,26 +974,32 @@ plotdata2 <- e2totals %>%
         mean_n_people_infected = mean(n_people_infected),
         errbar_n_people_infected = errbar_func(n_people_infected)
     ) %>%
+    mutate(
+        group = paste0(
+            "AT-", appointment_type, "_",
+            "CM-", as.integer(clinicians_meet_each_other)
+        )
+    ) %>%
     as.data.table()
 
-f2p1 <- (
-    make_people_exp2_plot(plotdata2, "A. All people",
+f3p1 <- (
+    make_people_exp2_plot(plotdata3, "A. All people",
                           y_axis_title = "Total #people infected")
 )
-f2p2 <- (
-    make_clinician_exp2_plot(plotdata2, "B. Clinicians",
+f3p2 <- (
+    make_clinician_exp2_plot(plotdata3, "B. Clinicians",
                              y_axis_title = "Total #clinicians infected")
 )
 
-fig2 <- (
+fig3 <- (
     (
-        f2p1 |
-        f2p2
+        f3p1 |
+        f3p2
     ) +
     plot_layout(guides = "collect") &
     theme(legend.position = "bottom")
 )
-ggsave(FIGURE_2_FILENAME, fig2, width = 20, height = 10, units = "cm")
+ggsave(FIGURE_3_FILENAME, fig3, width = 20, height = 10, units = "cm")
 
 
 # =============================================================================
@@ -991,5 +1011,95 @@ p_infected <- function(t, half_life = 1) {
     1 - 0.5^(t / half_life)
 }
 # plot(p_infected, 0, 0.4)  # approximately linear in the range y=0 to y=0.2
+
+
+# =============================================================================
+# SEIR model, exploring the nature of synergy in manipulations.
+# =============================================================================
+
+seir_total <- function(
+        final_time = 1000,
+        transmission_rate = 0.1,
+        initial_proportion_exposed = 0.01,
+        rate_from_exposed_to_infectious = 1/5,
+        recovery_rate = 1/7,
+        per_capita_death_rate_and_pop_birth_rate = 0,
+        initial_proportion_susceptible = 1 - initial_proportion_exposed,
+        initial_proportion_infectious = 0,
+        initial_proportion_recovered = 0,
+        verbose = FALSE) {
+    stopifnot(
+        initial_proportion_susceptible +
+        initial_proportion_exposed +
+        initial_proportion_infectious +
+        initial_proportion_recovered == 1
+    )
+    seir_info <- EpiDynamics::SEIR(
+        pars = c(
+            mu = per_capita_death_rate_and_pop_birth_rate,
+            beta = transmission_rate,
+            sigma = rate_from_exposed_to_infectious,
+            gamma = recovery_rate
+        ),
+        init = c(
+            S = initial_proportion_susceptible,
+            E = initial_proportion_exposed,
+            I = initial_proportion_infectious,
+            R = initial_proportion_recovered
+        ),
+        time = c(
+            0,  # initial time,
+            final_time
+        )
+    )
+    if (verbose) {
+        print(seir_info)
+    }
+    results <- seir_info$results
+    # Special case: if final_time == 0, you get two duplicate rows, not one. So:
+    final_values <- tail(results[results$time == final_time, ], 1)
+    final_s <- final_values$S  # final proportion susceptible
+    cumulative_infected <- 1 - final_s  # final proportion infected (exposed + infectious + recovered)
+    return(cumulative_infected)
+}
+# seir_total(final_time = 10000)
+
+
+seir_total_vector <- Vectorize(seir_total)
+# plot(seir_total_vector, 0, 1000)
+
+
+seirdata <- data.table(expand.grid(
+    transmission_rate = seq(0.00, 0.5, by = 0.001),
+    initial_proportion_exposed = c(0.01, 0.05)
+))
+seirdata[, initial_proportion_exposed_factor := factor(
+    initial_proportion_exposed,
+    levels = c(0.01, 0.05),
+    labels = c("1%", "5%")
+)]
+seirdata[, cumulative_infected := seir_total_vector(
+    transmission_rate = transmission_rate,
+    initial_proportion_exposed = initial_proportion_exposed)]
+
+fig4 <- (
+    ggplot(seirdata, aes(x = transmission_rate, y = cumulative_infected,
+                         colour = initial_proportion_exposed_factor)) +
+    geom_line() +
+    # geom_point() +
+    scale_y_log10() +
+    scale_colour_manual(values = c("blue", "red")) +
+    labs(colour = "Initial proportion exposed") +
+    xlab("Transmission rate") +
+    ylab("Cumulative proportion infected") +
+    ggtitle("Deterministic SEIR model") +
+    CORE_PLOT_ELEMENTS
+)
+ggsave(FIGURE_4_FILENAME, fig4, width = 15, height = 15, units = "cm")
+
+
+# =============================================================================
+# Done.
+# =============================================================================
 
 cat("Done.\n")

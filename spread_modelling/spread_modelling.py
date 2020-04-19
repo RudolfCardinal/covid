@@ -838,8 +838,10 @@ class Person(object):
                 the basis that longer exposure increases risk).
 
         Returns:
-            bool: was ``self`` infected?
+            bool: was ``self`` infected by this encounter?
         """
+        if self.infected:
+            return False  # already infected; can't happen twice
         if not other.infected:
             return False  # much quicker to skip in this situation
         infectivity = other.infectivity(now, prop_full_day)
@@ -972,6 +974,7 @@ class Population(object):
         for p in self.gen_people():
             if coin(self.config.p_baseline_infected):
                 p.infect(0)
+                # By definition they weren't infected before, so:
                 self.log_infection(p, 0)
 
     # -------------------------------------------------------------------------
@@ -1116,6 +1119,7 @@ class Population(object):
             # p.susceptible() is faster than coin()
             if p.susceptible() and coin(p_external_infection):
                 p.infect(now)
+                # They weren't infected before (as they were susceptible), so:
                 self.log_infection(p, today)
 
         # Household interactions:
@@ -1391,7 +1395,8 @@ def experiment_1(totals_filename: str,
 def experiment_2(totals_filename: str) -> None:
     """
     An additional test, relating to "hubs" or connectedness in the population
-    and the effect of clinician-clinician interactions then.
+    and the effect of clinician-clinician interactions (and appointment type)
+    then.
 
     Args:
         totals_filename:
@@ -1399,7 +1404,9 @@ def experiment_2(totals_filename: str) -> None:
     """
     mc = Metaconfig(
         n_iterations=N_ITERATIONS,
-        appointment_type=[Appointment.HOME_VISIT],
+        appointment_type=[Appointment.HOME_VISIT,
+                          Appointment.CLINIC,
+                          Appointment.REMOTE],
         clinicians_meet_each_other=[True, False],
         behavioural_infectivity_multiple_if_symptomatic=[1.0],
         p_baseline_infected=[0.01],
