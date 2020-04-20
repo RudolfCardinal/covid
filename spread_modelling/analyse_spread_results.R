@@ -42,6 +42,11 @@
 #
 # - https://online.stat.psu.edu/stat504/node/157/
 # - http://www.bbk.ac.uk/ems/faculty/brooms/teaching/SMDA/SMDA-07.pdf
+#
+# Practicalities:
+#
+# - Experiment 1: 48 * 2000 runs
+# - Experiment 1: 60 * 2000 runs
 
 DEMO_GLM_VS_LOGLINEAR <- '
 
@@ -137,9 +142,12 @@ OUTPUT_DIR <- file.path(THIS_DIR, "output")  # R output
 
 EXP1_TOTALS_FILENAME <- file.path(RESULTS_DIR, "exp1_totals.csv")
 EXP1_DAILY_FILENAME <- file.path(RESULTS_DIR, "exp1_daily.csv")
+EXP1B_TOTALS_FILENAME <- file.path(RESULTS_DIR, "exp1b_totals.csv")
+EXP1B_DAILY_FILENAME <- file.path(RESULTS_DIR, "exp1b_daily.csv")
 EXP2_TOTALS_FILENAME <- file.path(RESULTS_DIR, "exp2_totals.csv")
+
 EXP1_TOTALS_CACHE_FILENAME <- file.path(CACHE_DIR, "exp1_totals.rds")
-EXP2_DAILY_CACHE_FILENAME <- file.path(CACHE_DIR, "exp1_daily.rds")
+EXP1_DAILY_CACHE_FILENAME <- file.path(CACHE_DIR, "exp1_daily.rds")
 EXP2_TOTALS_CACHE_FILENAME <- file.path(CACHE_DIR, "exp2_totals.rds")
 RESULTS_FILENAME <- file.path(OUTPUT_DIR, "results.txt")
 FIGURE_2_FILENAME <- file.path(OUTPUT_DIR, "figure_2.pdf")
@@ -161,6 +169,8 @@ LINETYPES_CLINICIANS_MEET <- c("dashed", "solid")
 SIZES_SX_BEHAV_EFFECT <- c(0.75, 1.5)
 BOOLEAN_LEVELS <- c("False", "True")
 
+HIGH_EXTERNAL_INFECTION <- 0.02
+
 LABEL_SX_BEHAV_EFFECT <- "Sx behav. effect"
 LABEL_CLINICIANS_MEET <- "Clinicians meet each other"
 LABEL_APPOINTMENT_TYPE <- "Appointment type"
@@ -169,7 +179,7 @@ CORE_PLOT_ELEMENTS <- list(
     theme_bw(),
     theme(
         plot.title = element_text(face = "bold"),
-        axis.title.y = element_text(face = "bold")
+        axis.title = element_text(face = "bold")
     )
 )
 COMMON_PLOT_ELEMENTS <- c(CORE_PLOT_ELEMENTS, list(
@@ -229,10 +239,11 @@ get_totals <- function(filename) {
 
 
 get_exp1_totals <- function() {
-    return(get_totals(EXP1_TOTALS_FILENAME))
+    return(rbind(
+        get_totals(EXP1_TOTALS_FILENAME),
+        get_totals(EXP1B_TOTALS_FILENAME)
+    ))
 }
-
-
 get_exp2_totals <- function() {
     return(get_totals(EXP2_TOTALS_FILENAME))
 }
@@ -297,7 +308,10 @@ get_daily <- function(filename) {
 
 
 get_exp1_daily <- function() {
-    return(get_daily(EXP1_DAILY_FILENAME))
+    return(rbind(
+        get_daily(EXP1_DAILY_FILENAME),
+        get_daily(EXP1B_DAILY_FILENAME)
+    ))
 }
 
 
@@ -306,14 +320,21 @@ if (!exists("e1totals")) {
     e1totals <- misclang$load_rds_or_run_function(EXP1_TOTALS_CACHE_FILENAME,
                                                   get_exp1_totals)
 }
-if (!exists("e2totals")) {
-    e1daily <- misclang$load_rds_or_run_function(EXP2_DAILY_CACHE_FILENAME,
+if (!exists("e1daily")) {
+    e1daily <- misclang$load_rds_or_run_function(EXP1_DAILY_CACHE_FILENAME,
                                                  get_exp1_daily)
 }
 if (!exists("e2totals")) {
     e2totals <- misclang$load_rds_or_run_function(EXP2_TOTALS_CACHE_FILENAME,
                                                   get_exp2_totals)
 }
+
+# Sanity checks
+
+stopifnot(
+    mean(e1daily[day == 60]$cum_n_people_infected) ==
+    mean(e1totals$n_people_infected)
+)
 
 # stop("Loaded.")
 
@@ -483,11 +504,13 @@ write_output(
     mean(e1totals[appointment_type == "home_visit", prop_people_infected]) -
     mean(e1totals[appointment_type == "remote", prop_people_infected])
 )
-write_title(paste0(
-    "Exp 1: Whole population: highly simplified model ",
-    "(illustrates smaller 'bad' (+) effect of 'bad behaviour' ",
-    "(sx_behav_effect1) at 'bad infection rate' ",
-    "(p_external_infection_per_day0.02)"), subtitle = TRUE)
+write_title(
+    paste0(
+        "Exp 1: Whole population: highly simplified model ",
+        "(illustrates smaller 'bad' (+) effect of 'bad behaviour' ",
+        "(sx_behav_effect1) at 'bad infection rate' ",
+        "(p_external_infection_per_day", HIGH_EXTERNAL_INFECTION, ")"
+    ), subtitle = TRUE)
 write_glm_and_anova(
     n_people_infected ~
         p_external_infection_per_day *
@@ -571,14 +594,15 @@ write_glm_and_anova(
         sx_behav_effect,
     data = e1totals[p_external_infection_per_day == 0]
 )
-write_title("Exp 1: Clinician infection: external infection == 0.02", subtitle = TRUE)
+write_title(paste("Exp 1: Clinician infection: external infection == ",
+                  HIGH_EXTERNAL_INFECTION), subtitle = TRUE)
 write_glm_and_anova(
     n_clinicians_infected ~
         appointment_type *
         clinicians_meet_each_other *
         p_baseline_infected *
         sx_behav_effect,
-    data = e1totals[p_external_infection_per_day == 0.02]
+    data = e1totals[p_external_infection_per_day == HIGH_EXTERNAL_INFECTION]
 )
 
 # Effects of clinicians meeting up:
@@ -654,10 +678,15 @@ behav3 <- behav1 %>%
     group_by(appointment_type, p_external_infection_per_day) %>%
     summarise(mean_ppe_fraction_of_no_ppe = mean(ppe_fraction_of_no_ppe)) %>%
     as.data.table()
+behav4 <- behav1 %>%
+    group_by(clinicians_meet_each_other) %>%
+    summarise(mean_ppe_fraction_of_no_ppe = mean(ppe_fraction_of_no_ppe)) %>%
+    as.data.table()
 
 write_output(behav1)
 write_output(behav2)
 write_output(behav3)
+write_output(behav4)
 
 write_title(paste0(
     "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
@@ -669,15 +698,17 @@ write_glm_and_anova(
         sx_behav_effect,
     data = e1totals[p_external_infection_per_day == 0]
 )
-write_title(paste0(
-    "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
-    "Effect of sx_behav_effect (and appointment_type) ",
-    "with external infection at 2%"), subtitle = TRUE)
+write_title(
+    paste0(
+        "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
+        "Effect of sx_behav_effect (and appointment_type) ",
+        "with external infection at ", 100 * HIGH_EXTERNAL_INFECTION, "%"
+    ), subtitle = TRUE)
 write_glm_and_anova(
     n_clinicians_infected ~
         appointment_type *
         sx_behav_effect,
-    data = e1totals[p_external_infection_per_day == 0.02]
+    data = e1totals[p_external_infection_per_day == HIGH_EXTERNAL_INFECTION]
 )
 write_title(paste0(
     "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
@@ -689,15 +720,17 @@ write_glm_and_anova(
         sx_behav_effect,
     data = e1totals[p_external_infection_per_day == 0]
 )
-write_title(paste0(
-    "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
-    "Effect of sx_behav_effect (and clinicians_meet_each_other) ",
-    "with external infection at 2%"), subtitle = TRUE)
+write_title(
+    paste0(
+        "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
+        "Effect of sx_behav_effect (and clinicians_meet_each_other) ",
+        "with external infection at ", 100 * HIGH_EXTERNAL_INFECTION, "%"
+    ), subtitle = TRUE)
 write_glm_and_anova(
     n_clinicians_infected ~
         clinicians_meet_each_other *
         sx_behav_effect,
-    data = e1totals[p_external_infection_per_day == 0.02]
+    data = e1totals[p_external_infection_per_day == HIGH_EXTERNAL_INFECTION]
 )
 
 
@@ -932,8 +965,8 @@ plotdata2 <- plotdata2 %>%
     as.data.table()
 # More precise names for appointment type, for plotting:
 plotdata2[, appointment_type := factor(appointment_type,
-                                      levels = APPOINTMENT_TYPE_LEVELS,
-                                      labels = APPOINTMENT_TYPE_LABELS)]
+                                       levels = APPOINTMENT_TYPE_LEVELS,
+                                       labels = APPOINTMENT_TYPE_LABELS)]
 
 f2p1 <- (
     make_people_by_day_plot(plotdata2, "A. All people",
@@ -981,6 +1014,9 @@ plotdata3 <- e2totals %>%
         )
     ) %>%
     as.data.table()
+plotdata3[, appointment_type := factor(appointment_type,
+                                       levels = APPOINTMENT_TYPE_LEVELS,
+                                       labels = APPOINTMENT_TYPE_LABELS)]
 
 f3p1 <- (
     make_people_exp2_plot(plotdata3, "A. All people",
@@ -1082,6 +1118,100 @@ seirdata[, cumulative_infected := seir_total_vector(
     transmission_rate = transmission_rate,
     initial_proportion_exposed = initial_proportion_exposed)]
 
+
+# The SEIR model, EpiDynamics::SEIR, is program 2.6 in Keeling & Rohani (2007),
+# as per http://www.modelinginfectiousdiseases.org/ -> Chapter 2 -> Program 2.6
+# So we can get the exact meaning of EpiDynamics::SEIR parameters from there.
+# Their notes:
+KEELING_ROHANI_NOTES <- '
+
+We now introduce a refinement to the SIR model (Program 2.2) which takes into
+account a latent period. The process of transmission often occurs due to an
+initial inoculation with a very small number of pathogen units (e.g., a few
+bacterial cells or virions). A period of time then ensues during which the
+pathogen reproduces rapidly within the host, relatively unchallenged by the
+immune system. During this stage, pathogen abundance is too low for active
+transmission to other susceptible hosts, and yet the pathogen is present.
+Hence, the host cannot be categorized as susceptible, infectious, or recovered;
+we need to introduce a new category for these individuals who are infected but
+not yet infectious. These individuals are referred to as Exposed and are
+represented by the variable E in SEIR models.
+
+    dS/dt = μ - (βI + μ)S
+
+    dE/dt = βSI - (μ + σ)E
+
+    dI/dt = σE - (μ + γ)I
+
+    dR/dt = γI - μR
+
+Parameters
+
+μ	is the per capita death rate, and the population level birth rate.
+β	is the transmission rate and incorporates the encounter rate between
+    susceptible and infectious individuals together with the probability of
+    transmission.
+γ	is called the removal or recovery rate, though often we are more interested
+    in its reciprocal (1/γ) which determines the average infectious period.
+σ   is the rate at which individuals move from the exposed to the infectious
+    classes. Its reciprocal (1/σ) is the average latent (exposed) period.
+
+S(0)	is the initial proportion of the population that are susceptible.
+E(0)	is the initial proportion of the population that are exposed (infected
+        but not infectious)
+I(0)    is the initial proportion of the population that are infectious
+
+All rates are specified in days.
+
+Requirements.
+
+All parameters must be positive, and S(0)+E(0)+I(0) ≤ 1.
+
+'
+# So... we were correct to think that sigma = 1/(average latent period) and
+# gamma = 1/(average infectious period).
+SEIRC_LEVELS <- c("S", "E", "I", "R", "C")  # C = cumulative infected
+SEIRC_COLOURS <- c(S="black", E="orange", I="red", R="blue", C="green")
+seir_specimen <- data.table(EpiDynamics::SEIR(
+    pars = c(
+        mu = 0,  # birth/death rate
+        beta = 0.15,    # specimen transmission rate, as above
+        sigma = 1/5,    # rate, exposed -> infectious
+        gamma = 1/7     # rate, infectious -> recovery
+    ),
+    init = c(
+        S = 0.99,   # initial proportion susceptible
+        E = 0.01,   # initial proportion exposed
+        I = 0,      # initial proportion infectious
+        R = 0       # initial proportion recovered
+    ),
+    time = seq(0, 1000)
+)$results)
+seir_specimen[, C := E + I + R]  # cumulative infected
+seir_specimen_plotdata <- seir_specimen %>%
+    pivot_longer(
+        cols = c("S", "E", "I", "R", "C"),
+        names_to = "state"
+    ) %>%
+    dplyr::filter(
+        state != "S",
+        state != "C",
+        time <= 500
+    ) %>%
+    as.data.table()
+seir_specimen_plotdata[, state := factor(state, levels = SEIRC_LEVELS)]
+seir_specimen_plot <- (
+    ggplot(seir_specimen_plotdata,
+           aes(x = time, y = value,
+               colour = state, linetype = state, shape = state)) +
+    geom_line() +
+    scale_colour_manual(values = SEIRC_COLOURS) +
+    # scale_shape_manual() +
+    CORE_PLOT_ELEMENTS
+)
+# print(seir_specimen_plot)
+
+
 fig4 <- (
     ggplot(seirdata, aes(x = transmission_rate, y = cumulative_infected,
                          colour = initial_proportion_exposed_factor)) +
@@ -1090,7 +1220,7 @@ fig4 <- (
     scale_y_log10() +
     scale_colour_manual(values = c("blue", "red")) +
     labs(colour = "Initial proportion exposed") +
-    xlab("Transmission rate") +
+    xlab("Transmission rate, β") +
     ylab("Cumulative proportion infected") +
     ggtitle("Deterministic SEIR model") +
     CORE_PLOT_ELEMENTS

@@ -96,31 +96,37 @@ Changelog
 - 2020-04-08:
 
   - Option to merge households (n_patients_per_household)
+  
+- 2020-04-19:
 
+  - Bugfix: bug allowed infection to be double-counted.
+  - Shift assistance functions to cardinal_pythonlib==1.0.86.
 
 """  # noqa
 
 import argparse
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor
-import contextlib
-import cProfile
 import copy
 import csv
 from enum import Enum
-from itertools import combinations, product
+from itertools import combinations
 import logging
 import math
 import multiprocessing
 import os
 import random
-from random import random as random_random
+import resource
 from timeit import default_timer, Timer
 from typing import (Any, Callable, Dict, Generator, Iterable, List, Optional,
                     TextIO, Tuple)
 
+from cardinal_pythonlib.contexts import dummy_context_mgr
+from cardinal_pythonlib.iterhelp import product_dict
 from cardinal_pythonlib.lists import chunks
 from cardinal_pythonlib.logs import main_only_quicksetup_rootlogger
+from cardinal_pythonlib.parallel import gen_parallel_results_efficiently
+from cardinal_pythonlib.profile import do_cprofile
+from cardinal_pythonlib.randomness import coin as cpl_coin
 import numpy as np
 
 log = logging.getLogger(__name__)
@@ -135,7 +141,6 @@ NUMPY_COIN = False  # True (numpy) is slower
 THIS_DIR = os.path.abspath(os.path.dirname(__file__))
 
 DEFAULT_BEHAV_INFECTIVITY_MULTIPLE_IF_SYMPTOMATIC = 0.1
-# DEFAULT_OUTPUT_DIR = os.path.expanduser("~/tmp/cpft_covid_modelling")
 DEFAULT_OUTPUT_DIR = os.path.join(THIS_DIR, "results")
 
 N_ITERATIONS = 2000
@@ -162,6 +167,7 @@ class RunMode(Enum):
     DEBUG_CHECK_N_ITERATIONS = "debug_check_n_iterations"
     SELFTEST = "selftest"
     EXP1 = "experiment_1"
+    EXP1B = "experiment_1b"
     EXP2 = "experiment_2"
 
 
@@ -190,76 +196,11 @@ def numpy_coin(p: float) -> bool:
     return bool(np.random.binomial(n=1, p=p))
 
 
-def fast_coin(p: float) -> bool:
-    """
-    Faster version of :func`cardinal_pythonlib.randomness.coin` (q.v.).
-    """
-    return random_random() < p
-
-
 # Choose our coin-flip function
 if NUMPY_COIN:
     coin = numpy_coin
 else:
-    coin = fast_coin
-
-
-def do_cprofile(func: FuncType) -> FuncType:
-    """
-    Print profile stats to screen. To be used as a decorator for the function
-    or method you want to profile.
-    """
-    def profiled_func(*args, **kwargs) -> Any:
-        profile = cProfile.Profile()
-        try:
-            profile.enable()
-            result = func(*args, **kwargs)
-            profile.disable()
-            return result
-        finally:
-            # profile.print_stats(sort="cumulative")
-            profile.print_stats(sort="tottime")  # best thing to optimize?
-    return profiled_func
-
-
-def product_dict(**kwargs: Iterable) -> Iterable[Dict]:
-    """
-    See
-    https://stackoverflow.com/questions/5228158/cartesian-product-of-a-dictionary-of-lists.
-
-    Takes keyword arguments, and yields dictionaries containing every
-    combination of possibilities for each keyword.
-    
-    Examples:
-    
-    .. code-block:: python
-    
-        >>> list(product_dict(a=[1, 2], b=[3, 4]))
-        [{'a': 1, 'b': 3}, {'a': 1, 'b': 4}, {'a': 2, 'b': 3}, {'a': 2, 'b': 4}]
-
-        >>> list(product_dict(a="x", b=range(3)))
-        [{'a': 'x', 'b': 0}, {'a': 'x', 'b': 1}, {'a': 'x', 'b': 2}]
-
-        >>> product_dict(a="x", b=range(3))
-        <generator object product_dict at 0x7fb328070678>
-    """  # noqa
-    keys = kwargs.keys()
-    vals = kwargs.values()
-    for instance in product(*vals):
-        yield dict(zip(keys, instance))
-
-
-@contextlib.contextmanager
-def dummy_context_mgr():
-    """
-    We're using Python 3.6 which doesn't have contextlib.nullcontext.
-    Hence this.
-
-    - https://stackoverflow.com/questions/27803059/conditional-with-statement-in-python
-    - See also
-      https://stackoverflow.com/questions/893333/multiple-variables-in-a-with-statement
-    """  # noqa
-    yield None
+    coin = cpl_coin  # faster
 
 
 # =============================================================================
@@ -546,7 +487,8 @@ class Metaconfig(object):
 
     def _simulate_all_main(self,
                            totals_file: TextIO,
-                           daily_file: Optional[TextIO]) -> None:
+                           daily_file: Optional[TextIO],
+                           debug_usage: bool = False) -> None:
         """
         Simulate everything and save the results.
 
@@ -555,6 +497,8 @@ class Metaconfig(object):
                 output file for whole-run totals
             daily_file:
                 output file for day-by-day totals
+            debug_usage:
+                show memory usage as we go
 
         Concurrency performance notes
         =============================
@@ -579,9 +523,16 @@ class Metaconfig(object):
                     # ... also waits for many to complete before we get
                     #     here -- but not all? Seems to operate batch-wise.
                     pass
+                    
+        - Also BoundedProcessPoolExecutor;
+          https://pypi.org/project/bounded-pool-executor/
+        
+        - Also
+          https://alexwlchan.net/2019/10/adventures-with-concurrent-futures/
 
         - Profiling shows that most time is spent in ``{method 'acquire' of
-          '_thread.lock' objects}``.
+          '_thread.lock' objects}``. But that's because I was profiling the
+          top-level process, not the worker.
 
         - Going faster:
 
@@ -610,15 +561,25 @@ class Metaconfig(object):
         n_cpus = multiprocessing.cpu_count()
         log.info(f"Using {n_cpus} processes")
 
-        with ProcessPoolExecutor(max_workers=n_cpus) as executor:
-            for pop in executor.map(self.simulate_one, self.gen_configs()):
-                log.debug("Processing result")
-                control_data_row = self.csv_data_row(pop.config)
-                writer_totals.writerow(control_data_row +
-                                       pop.totals_csv_data_row())
-                if use_daily_file:
-                    for r in pop.daily_csv_data_rows():
-                        writer_daily.writerow(control_data_row + r)
+        results = gen_parallel_results_efficiently(
+            self.simulate_one,
+            self.gen_configs(),
+            max_workers=n_cpus
+        )
+        for pop in results:
+            if debug_usage:
+                usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                log.debug(f"Top-level process memory usage: {usage}")
+                # ... e.g. 1,386,028 for debug_short via
+                # BoundedProcessPoolExecutor; 133708 for the same thing via
+                # parallelize_processes_efficiently().
+            log.debug("Processing result")
+            control_data_row = self.csv_data_row(pop.config)
+            writer_totals.writerow(control_data_row +
+                                   pop.totals_csv_data_row())
+            if use_daily_file:
+                for r in pop.daily_csv_data_rows():
+                    writer_daily.writerow(control_data_row + r)
 
     def simulate_all(self,
                      totals_filename: str,
@@ -1375,9 +1336,6 @@ def experiment_1(totals_filename: str,
         n_iterations:
             number of iterations
     """
-    # -------------------------------------------------------------------------
-    # MAIN EXPERIMENTAL SETTINGS
-    # -------------------------------------------------------------------------
     mc = Metaconfig(
         n_iterations=n_iterations,
         appointment_type=[x for x in Appointment],
@@ -1385,7 +1343,27 @@ def experiment_1(totals_filename: str,
         clinicians_meet_each_other=[True, False],
         behavioural_infectivity_multiple_if_symptomatic=[0.1, 1.0],
         p_baseline_infected=[0.01, 0.05],
-        p_external_infection_per_day=[0.0, 0.02],
+        p_external_infection_per_day=[0.0, 0.02],  # 0%, 2%
+        n_patients_per_household=[1],
+    )
+    mc.simulate_all(totals_filename=totals_filename,
+                    daily_filename=daily_filename)
+
+
+def experiment_1b(totals_filename: str,
+                  daily_filename: str,
+                  n_iterations: int = N_ITERATIONS) -> None:
+    """
+    Experiment 1B: external infection a bit lower (may be at ceiling in terms
+    of dominating the other effect in Exp 1).
+    """
+    mc = Metaconfig(
+        n_iterations=n_iterations,
+        appointment_type=[x for x in Appointment],
+        clinicians_meet_each_other=[True, False],
+        behavioural_infectivity_multiple_if_symptomatic=[0.1, 1.0],
+        p_baseline_infected=[0.01, 0.05],
+        p_external_infection_per_day=[0.005, 0.01],  # 0.5%, 1%
         n_patients_per_household=[1],
     )
     mc.simulate_all(totals_filename=totals_filename,
@@ -1517,6 +1495,21 @@ def main() -> None:
         help="Experiment 1: Main output file for daily results"
     )
     parser.add_argument(
+        "--outfile_exp1b_totals", type=str,
+        default=os.path.join(DEFAULT_OUTPUT_DIR, "exp1b_totals.csv"),
+        help="Experient 1B: Main output file for totals"
+    )
+    parser.add_argument(
+        "--outfile_exp1b_daily", type=str,
+        default=os.path.join(DEFAULT_OUTPUT_DIR, "exp1b_daily.csv"),
+        help="Experiment 1B: Main output file for daily results"
+    )
+    parser.add_argument(
+        "--outfile_exp2_totals", type=str,
+        default=os.path.join(DEFAULT_OUTPUT_DIR, "exp2_totals.csv"),
+        help="Experiment 2: output file for totals"
+    )
+    parser.add_argument(
         "--outfile_test_totals", type=str,
         default=os.path.join(DEFAULT_OUTPUT_DIR, "test_totals.csv"),
         help="Test output file for totals"
@@ -1527,13 +1520,9 @@ def main() -> None:
         help="Test output file for daily results"
     )
     parser.add_argument(
-        "--outfile_exp2_totals", type=str,
-        default=os.path.join(DEFAULT_OUTPUT_DIR, "exp2_totals.csv"),
-        help="Experiment 2: output file for totals"
-    )
-    parser.add_argument(
         "--seed", default=1234, type=str,
-        help="Seed for random number generator ('None' gives a random seed)"
+        help="Seed for random number generator ('None' gives a random seed); "
+             "ignored for predefined experiments."
     )
     parser.add_argument(
         "--verbose", action="store_true",
@@ -1547,25 +1536,37 @@ def main() -> None:
         with_process_id=True
     )
 
+    # What we're doing
+    runmode = RunMode(args.runmode)
+
     # RNG seed
-    try:
-        seed = int(args.seed)
-    except TypeError:  # args.seed likely None
-        seed = None
-    except ValueError:  # a string
-        if args.seed.lower() == "none":
+    if runmode in [RunMode.EXP1, RunMode.EXP2]:
+        seed = 1234  # for consistency
+    elif runmode == RunMode.EXP1B:
+        # Not that it is likely to make any difference, but ideally this should
+        # be different for Exp 1B and Exp 1.
+        seed = 2345
+    else:
+        try:
+            seed = int(args.seed)
+        except TypeError:  # args.seed likely None
             seed = None
-        else:
-            raise
+        except ValueError:  # a string
+            if args.seed.lower() == "none":
+                seed = None
+            else:
+                raise
     log.info(f"Using random number generator seed: {seed}")
     random.seed(seed)
     np.random.seed(seed)
 
     # Do something useful
-    runmode = RunMode(args.runmode)
     if runmode == RunMode.SELFTEST:
         selftest()
     elif runmode == RunMode.DEBUG_SHORT:
+        log.warning(f"Pausing... Fire up 'top -p {os.getpid()}' "
+                    f"to watch memory usage...")
+        input("Press Enter to continue: ")
         experiment_1(totals_filename=args.outfile_test_totals,
                      daily_filename=args.outfile_test_daily,
                      n_iterations=2)
@@ -1577,6 +1578,9 @@ def main() -> None:
     elif runmode == RunMode.EXP1:
         experiment_1(totals_filename=args.outfile_exp1_totals,
                      daily_filename=args.outfile_exp1_daily)
+    elif runmode == RunMode.EXP1B:
+        experiment_1b(totals_filename=args.outfile_exp1b_totals,
+                      daily_filename=args.outfile_exp1b_daily)
     elif runmode == RunMode.EXP2:
         experiment_2(totals_filename=args.outfile_exp2_totals)
     else:
