@@ -159,35 +159,50 @@ FIGURE_4_FILENAME <- file.path(OUTPUT_DIR, "figure_4.pdf")
 # Other constants
 # =============================================================================
 
+RUN_GLMS <- TRUE  # can be slow
+
 # Ensure correct order of factor levels
 APPOINTMENT_TYPE_LEVELS <- c("remote", "clinic", "home_visit")
-APPOINTMENT_TYPE_LABELS <- c("Remote visit (RV)",
-                             "Patient only (PO)",
-                             "Family contact (FC)")
+APPOINTMENT_TYPE_LABELS_LONG <- c("Remote visit (RV)",
+                                  "Patient only (PO)",
+                                  "Family contact (FC)")
+APPOINTMENT_TYPE_LABELS_SHORT <- c("RV", "PO", "FC")
 COLOURS_APPOINTMENT_TYPES <- c("black", "blue", "red")
+SHAPES_APPOINTMENT_TYPES <- c(25, 23, 24)
+LINETYPES_APPOINTMENT_TYPES <- c("dotted", "dashed", "solid")
+
 LINETYPES_CLINICIANS_MEET <- c("dashed", "solid")
+SHAPES_CLINICIANS_MEET <- c(25, 24)  # down arrow false, up arrow true
+
 SIZES_SX_BEHAV_EFFECT <- c(0.75, 1.5)
+COLOURS_SX_BEHAV_EFFECT <- c("black", "white")  # present (0.1), absent (1)
 BOOLEAN_LEVELS <- c("False", "True")
 
-HIGH_EXTERNAL_INFECTION <- 0.02
+LEVELS_INFECTION <- c(
+    "Baseline 1%,\nexternal 0%",
+    "Baseline 1%,\nexternal 0.5%",
+    "Baseline 1%,\nexternal 1%",
+    "Baseline 1%,\nexternal 2%",
+    "Baseline 5%,\nexternal 0%",
+    "Baseline 5%,\nexternal 0.5%",
+    "Baseline 5%,\nexternal 1%",
+    "Baseline 5%,\nexternal 2%"
+)
+
+# HIGH_EXTERNAL_INFECTION <- 0.02
 
 LABEL_SX_BEHAV_EFFECT <- "Sx behav. effect"
 LABEL_CLINICIANS_MEET <- "Clinicians meet each other"
 LABEL_APPOINTMENT_TYPE <- "Appointment type"
 
-CORE_PLOT_ELEMENTS <- list(
+COMMON_PLOT_ELEMENTS <- list(
     theme_bw(),
     theme(
         plot.title = element_text(face = "bold"),
-        axis.title = element_text(face = "bold")
+        axis.title.y = element_text(face = "bold"),
+        axis.title.x = element_text(face = "bold")
     )
 )
-COMMON_PLOT_ELEMENTS <- c(CORE_PLOT_ELEMENTS, list(
-    scale_colour_manual(values = COLOURS_APPOINTMENT_TYPES),
-    scale_fill_manual(values = COLOURS_APPOINTMENT_TYPES),
-    scale_linetype_manual(values = LINETYPES_CLINICIANS_MEET),
-    scale_size_manual(values = SIZES_SX_BEHAV_EFFECT)
-))
 
 OUTPUT_COLWIDTH <- 120
 
@@ -234,16 +249,67 @@ get_totals <- function(filename) {
     e1totals[, prop_patients_infected := n_patients_infected / n_patients]
     e1totals[, prop_family_infected := n_family_infected / n_family]
 
+    e1totals[, group := paste0(
+        "AT-", appointment_type, "_",
+        "CM-", as.integer(clinicians_meet_each_other), "_",
+        "SIMS-", sx_behav_effect, "_",
+        "BL-", p_baseline_infected, "_",
+        "EXT-", p_external_infection_per_day
+    )]
+
     return(e1totals)
 }
 
 
-get_exp1_totals <- function() {
-    return(rbind(
+get_exp1_totals <- function(daily) {
+    totals <- rbind(
         get_totals(EXP1_TOTALS_FILENAME),
         get_totals(EXP1B_TOTALS_FILENAME)
-    ))
+    )
+    cat("Merging in initial infection rates...\n")
+    initially_infected <- daily %>%
+        dplyr::filter(day == 0) %>%
+        select(
+            # Experimental condition
+            appointment_type,
+            clinicians_meet_each_other,
+            p_baseline_infected,
+            p_external_infection_per_day,
+            sx_behav_effect,
+            n_patients_per_household,
+            # Iteration
+            iteration,
+            # Values of interest
+            n_people_infected,
+            n_clinicians_infected) %>%
+        rename(
+            initial_n_people_infected = n_people_infected,
+            initial_n_clinicians_infected = n_clinicians_infected
+        ) %>%
+        as.data.table()
+    stopifnot(nrow(totals) == nrow(initially_infected))
+    # A full join is very slow (192000 rows each data table). So we can take
+    # advantage of the fact that they are identical tables, as long as they're
+    # correctly sorted -- we must include "iteration":
+    keycols <- c("appointment_type",
+                 "clinicians_meet_each_other",
+                 "p_baseline_infected",
+                 "p_external_infection_per_day",
+                 "sx_behav_effect",
+                 "n_patients_per_household",
+                 "iteration")
+    setkeyv(totals, keycols)
+    setkeyv(initially_infected, keycols)
+    totals[, initial_n_people_infected :=
+                initially_infected$initial_n_people_infected]
+    totals[, initial_n_clinicians_infected :=
+                initially_infected$initial_n_clinicians_infected]
+    stopifnot(all(totals$n_people_infected >= totals$initial_n_people_infected))
+    stopifnot(all(totals$n_clinicians_infected >= totals$initial_n_clinicians_infected))
+    return(totals)
 }
+
+
 get_exp2_totals <- function() {
     return(get_totals(EXP2_TOTALS_FILENAME))
 }
@@ -316,13 +382,13 @@ get_exp1_daily <- function() {
 
 
 # Use an exists() check to save reloading from disk every time we re-source().
-if (!exists("e1totals")) {
-    e1totals <- misclang$load_rds_or_run_function(EXP1_TOTALS_CACHE_FILENAME,
-                                                  get_exp1_totals)
-}
 if (!exists("e1daily")) {
     e1daily <- misclang$load_rds_or_run_function(EXP1_DAILY_CACHE_FILENAME,
                                                  get_exp1_daily)
+}
+if (!exists("e1totals")) {
+    e1totals <- misclang$load_rds_or_run_function(EXP1_TOTALS_CACHE_FILENAME,
+                                                  get_exp1_totals, e1daily)
 }
 if (!exists("e2totals")) {
     e2totals <- misclang$load_rds_or_run_function(EXP2_TOTALS_CACHE_FILENAME,
@@ -382,6 +448,14 @@ write_output <- function(x, append = TRUE, filename = RESULTS_FILENAME)
 write_glm_and_anova <- function(formula, data, append = TRUE,
                                 family = poisson(link = "log"),
                                 filename = RESULTS_FILENAME) {
+    if (!RUN_GLMS) {
+        cat("Skipping an analysis...\n")
+        return()
+    }
+
+    cat("GLM:\n")
+    print(formula)
+
     old_contrasts <- getOption("contrasts")
     sink(filename, append = append)
 
@@ -430,6 +504,8 @@ write_glm_and_anova <- function(formula, data, append = TRUE,
 
     sink()
     options(contrasts = old_contrasts)
+
+    cat("... GLM done.\n")
 }
 
 
@@ -441,46 +517,33 @@ options(width = OUTPUT_COLWIDTH)
 # -------------------------------------------------------------------------
 # Experiment 1
 # -------------------------------------------------------------------------
+# These analyses don't take account of time (day), and just use final
+# e1totals:
+
+e1totals[, AT := appointment_type]
+e1totals[, CM := clinicians_meet_each_other]
+e1totals[, BL := p_baseline_infected]
+e1totals[, SX := sx_behav_effect]
+e1totals[, EX := as.factor(p_external_infection_per_day)]
 
 write_title("Experiment 1", append = FALSE)
 write_title("Exp 1: Summary")
 s1 <- e1totals %>%
-    group_by(
-        appointment_type,
-        clinicians_meet_each_other,
-        sx_behav_effect,
-        p_baseline_infected,
-        p_external_infection_per_day
+    mutate(
+        new_clinician_infections =
+            n_clinicians_infected - initial_n_clinicians_infected
     ) %>%
+    group_by(AT, CM, SX, BL, EX) %>%
     summarise(
         mean_prop_people_infected = mean(prop_people_infected),
         mean_prop_clinicians_infected = mean(prop_clinicians_infected),
         mean_prop_patients_infected = mean(prop_patients_infected),
         mean_prop_family_infected = mean(prop_family_infected),
-        mean_n_contacts = mean(n_contacts)
+        mean_n_contacts = mean(n_contacts),
+        mean_new_clinician_infections = mean(new_clinician_infections)
     ) %>%
     as.data.table()
 write_output(s1)
-daily_long <- e1daily %>%
-    gather(key = who,
-           value = n_infected,
-           cum_n_people_infected,
-           cum_n_clinicians_infected,
-           cum_n_patients_infected,
-           cum_n_family_infected) %>%
-    mutate(
-        who = dplyr::recode(
-            who,
-            cum_n_people_infected = "people",
-            cum_n_clinicians_infected = "clinicians",
-            cum_n_patients_infected = "patients",
-            cum_n_family_infected = "family"
-        )
-    ) %>%
-    as.data.table()
-
-# These analyses don't take account of time (day), and just use final
-# e1totals:
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Whole population infections
@@ -488,12 +551,7 @@ daily_long <- e1daily %>%
 write_title("Exp 1: Whole population infection")
 write_title("Exp 1: Whole population: full model", subtitle = TRUE)
 write_glm_and_anova(
-    n_people_infected ~
-        appointment_type *
-        clinicians_meet_each_other *
-        p_baseline_infected *
-        p_external_infection_per_day *
-        sx_behav_effect,
+    n_people_infected ~ AT * CM * BL * EX * SX,
     data = e1totals
 )
 write_title("Exp 1: Whole population: mean comparisons", subtitle = TRUE)
@@ -508,13 +566,10 @@ write_title(
     paste0(
         "Exp 1: Whole population: highly simplified model ",
         "(illustrates smaller 'bad' (+) effect of 'bad behaviour' ",
-        "(sx_behav_effect1) at 'bad infection rate' ",
-        "(p_external_infection_per_day", HIGH_EXTERNAL_INFECTION, ")"
+        " at 'bad infection rate')"
     ), subtitle = TRUE)
 write_glm_and_anova(
-    n_people_infected ~
-        p_external_infection_per_day *
-        sx_behav_effect,
+    n_people_infected ~ EX * SX,
     data = e1totals
 )
 
@@ -524,12 +579,7 @@ write_glm_and_anova(
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 write_title("Exp 1: Clinician infection")
 write_glm_and_anova(
-    n_clinicians_infected ~
-        appointment_type *
-        clinicians_meet_each_other *
-        p_baseline_infected *
-        p_external_infection_per_day *
-        sx_behav_effect,
+    n_clinicians_infected ~ AT * CM * BL * EX * SX,
     data = e1totals
 )
 
@@ -537,149 +587,140 @@ write_glm_and_anova(
 
 write_title("Exp 1: Clinician infection: appointment types", subtitle = TRUE)
 apptypes1 <- s1 %>%
-    select(
-        mean_prop_clinicians_infected,
-        appointment_type,
-        clinicians_meet_each_other,
-        p_baseline_infected,
-        p_external_infection_per_day,
-        sx_behav_effect
-    ) %>%
-    mutate(
-        p_baseline_infected := as.numeric(as.character(p_baseline_infected))
-    ) %>%
+    select(AT, CM, BL, EX, SX, mean_new_clinician_infections) %>%
     pivot_wider(
         names_prefix = "apptype_",
-        names_from = appointment_type,
-        values_from = mean_prop_clinicians_infected
+        names_from = AT,
+        values_from = mean_new_clinician_infections
     ) %>%
     as.data.table()
 apptypes1[, clinic_fraction_of_extra_vs_home_visit := (
-    (apptype_clinic - p_baseline_infected) /
-    (apptype_home_visit - p_baseline_infected)
+    apptype_clinic / apptype_home_visit
 )]
 apptypes1[, remote_fraction_of_extra_vs_home_visit := (
-    (apptype_remote - p_baseline_infected) /
-    (apptype_home_visit - p_baseline_infected)
+    apptype_remote / apptype_home_visit
 )]
 apptypes2 <- apptypes1 %>%
-    group_by(p_external_infection_per_day) %>%
+    group_by(EX) %>%
     summarise(
         mean_clinic_fraction_of_extra_vs_home_visit = mean(clinic_fraction_of_extra_vs_home_visit),
         mean_remote_fraction_of_extra_vs_home_visit = mean(remote_fraction_of_extra_vs_home_visit),
     ) %>%
     as.data.table()
 apptypes3 <- apptypes1 %>%
-    group_by(p_external_infection_per_day, clinicians_meet_each_other) %>%
+    group_by(EX, CM) %>%
+    summarise(
+        mean_clinic_fraction_of_extra_vs_home_visit = mean(clinic_fraction_of_extra_vs_home_visit),
+        mean_remote_fraction_of_extra_vs_home_visit = mean(remote_fraction_of_extra_vs_home_visit),
+    ) %>%
+    as.data.table()
+apptypes4 <- apptypes1 %>%
+    group_by(EX, SX) %>%
+    summarise(
+        mean_clinic_fraction_of_extra_vs_home_visit = mean(clinic_fraction_of_extra_vs_home_visit),
+        mean_remote_fraction_of_extra_vs_home_visit = mean(remote_fraction_of_extra_vs_home_visit),
+    ) %>%
+    as.data.table()
+apptypes5 <- apptypes1 %>%
+    group_by(SX) %>%
     summarise(
         mean_clinic_fraction_of_extra_vs_home_visit = mean(clinic_fraction_of_extra_vs_home_visit),
         mean_remote_fraction_of_extra_vs_home_visit = mean(remote_fraction_of_extra_vs_home_visit),
     ) %>%
     as.data.table()
 
-write_output(apptypes1)
+# write_output(apptypes1)
 write_output(apptypes2)
-write_output(apptypes3)
+# write_output(apptypes3)
+write_output(apptypes4)
 
-write_title(paste0(
-    "Exp 1: Clinician infection: external infection == 0 ",
-    "(Do appointment_type * clinicians_meet_each_other interactions persist ",
-    "in each 'external infection' condition?)"
-), subtitle = TRUE)
-write_glm_and_anova(
-    n_clinicians_infected ~
-        appointment_type *
-        clinicians_meet_each_other *
-        p_baseline_infected *
-        sx_behav_effect,
-    data = e1totals[p_external_infection_per_day == 0]
-)
-write_title(paste("Exp 1: Clinician infection: external infection == ",
-                  HIGH_EXTERNAL_INFECTION), subtitle = TRUE)
-write_glm_and_anova(
-    n_clinicians_infected ~
-        appointment_type *
-        clinicians_meet_each_other *
-        p_baseline_infected *
-        sx_behav_effect,
-    data = e1totals[p_external_infection_per_day == HIGH_EXTERNAL_INFECTION]
-)
+#write_title(paste0(
+#    "Exp 1: Clinician infection: external infection == 0 ",
+#    "(Do appointment_type * clinicians_meet_each_other interactions persist ",
+#    "in each 'external infection' condition?)"
+#), subtitle = TRUE)
+#write_glm_and_anova(
+#    n_clinicians_infected ~
+#        appointment_type *
+#        clinicians_meet_each_other *
+#        p_baseline_infected *
+#        sx_behav_effect,
+#    data = e1totals[p_external_infection_per_day == 0]
+#)
+#write_title(paste("Exp 1: Clinician infection: external infection == ",
+#                  HIGH_EXTERNAL_INFECTION), subtitle = TRUE)
+#write_glm_and_anova(
+#    n_clinicians_infected ~
+#        appointment_type *
+#        clinicians_meet_each_other *
+#        p_baseline_infected *
+#        sx_behav_effect,
+#    data = e1totals[p_external_infection_per_day == HIGH_EXTERNAL_INFECTION]
+#)
 
 # Effects of clinicians meeting up:
 
 write_title("Exp 1: Clinician infection: clinicians meeting up", subtitle = TRUE)
 meetups1 <- s1 %>%
-    select(
-        mean_prop_clinicians_infected,
-        appointment_type,
-        clinicians_meet_each_other,
-        p_baseline_infected,
-        p_external_infection_per_day,
-        sx_behav_effect
-    ) %>%
-    mutate(
-        p_baseline_infected := as.numeric(as.character(p_baseline_infected))
-    ) %>%
+    select(AT, CM, BL, EX, SX, mean_new_clinician_infections) %>%
     pivot_wider(
         names_prefix = "clinicians_meet_",
-        names_from = clinicians_meet_each_other,
-        values_from = mean_prop_clinicians_infected
+        names_from = CM,
+        values_from = mean_new_clinician_infections
     ) %>%
     as.data.table()
 meetups1[, no_meet_fraction_of_extra := (
-    (clinicians_meet_False - p_baseline_infected) /
-    (clinicians_meet_True - p_baseline_infected)
+    clinicians_meet_False / clinicians_meet_True
 )]
 meetups2 <- meetups1 %>%
-    group_by(appointment_type) %>%
+    group_by(AT) %>%
     summarise(mean_no_meet_fraction = mean(no_meet_fraction_of_extra)) %>%
     as.data.table()
 meetups3 <- meetups1 %>%
-    group_by(appointment_type, p_external_infection_per_day) %>%
+    group_by(AT, EX) %>%
     summarise(mean_no_meet_fraction = mean(no_meet_fraction_of_extra)) %>%
     as.data.table()
 # NB OK to use unweighted means like this, as all groups have equal sizes
 # etc.
+meetups4 <- meetups1 %>%
+    group_by(AT, EX, SX) %>%
+    summarise(mean_no_meet_fraction = mean(no_meet_fraction_of_extra)) %>%
+    as.data.table()
 
-write_output(meetups1)
-write_output(meetups2)
+# write_output(meetups1)
+# write_output(meetups2)
 write_output(meetups3)
+write_output(meetups4)
+write_output(meetups4[EX == 0 & AT == "clinic"])
 
 # Effects of sx_behav_effect:
 
 write_title("Exp 1: Clinician infection: sx_behav_effect", subtitle = TRUE)
 behav1 <- s1 %>%
-    select(
-        mean_prop_clinicians_infected,
-        appointment_type,
-        clinicians_meet_each_other,
-        p_baseline_infected,
-        p_external_infection_per_day,
-        sx_behav_effect
-    ) %>%
-    mutate(
-        p_baseline_infected := as.numeric(as.character(p_baseline_infected))
-    ) %>%
+    select(AT, CM, BL, EX, SX, mean_new_clinician_infections) %>%
     pivot_wider(
         names_prefix = "behav_",
-        names_from = sx_behav_effect,
-        values_from = mean_prop_clinicians_infected
+        names_from = SX,
+        values_from = mean_new_clinician_infections
     ) %>%
     as.data.table()
 behav1[, ppe_fraction_of_no_ppe := (
-    (behav_0.1 - p_baseline_infected) /
-    (behav_1 - p_baseline_infected)
+    behav_0.1 / behav_1
 )]
-behav2 <- behav1 %>%
-    group_by(appointment_type) %>%
+behav2 <- behav1[!is.na(ppe_fraction_of_no_ppe)] %>%
+    group_by(AT) %>%
     summarise(mean_ppe_fraction_of_no_ppe = mean(ppe_fraction_of_no_ppe)) %>%
     as.data.table()
-behav3 <- behav1 %>%
-    group_by(appointment_type, p_external_infection_per_day) %>%
+behav3 <- behav1[!is.na(ppe_fraction_of_no_ppe)] %>%
+    group_by(AT, EX) %>%
     summarise(mean_ppe_fraction_of_no_ppe = mean(ppe_fraction_of_no_ppe)) %>%
     as.data.table()
-behav4 <- behav1 %>%
-    group_by(clinicians_meet_each_other) %>%
+behav4 <- behav1[!is.na(ppe_fraction_of_no_ppe)] %>%
+    group_by(CM) %>%
+    summarise(mean_ppe_fraction_of_no_ppe = mean(ppe_fraction_of_no_ppe)) %>%
+    as.data.table()
+behav5 <- behav1[!is.na(ppe_fraction_of_no_ppe)] %>%
+    group_by(EX) %>%
     summarise(mean_ppe_fraction_of_no_ppe = mean(ppe_fraction_of_no_ppe)) %>%
     as.data.table()
 
@@ -688,76 +729,135 @@ write_output(behav2)
 write_output(behav3)
 write_output(behav4)
 
-write_title(paste0(
-    "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
-    "Effect of sx_behav_effect (and appointment_type) ",
-    "with external infection at 0%"), subtitle = TRUE)
-write_glm_and_anova(
-    n_clinicians_infected ~
-        appointment_type *
-        sx_behav_effect,
-    data = e1totals[p_external_infection_per_day == 0]
-)
-write_title(
-    paste0(
-        "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
-        "Effect of sx_behav_effect (and appointment_type) ",
-        "with external infection at ", 100 * HIGH_EXTERNAL_INFECTION, "%"
-    ), subtitle = TRUE)
-write_glm_and_anova(
-    n_clinicians_infected ~
-        appointment_type *
-        sx_behav_effect,
-    data = e1totals[p_external_infection_per_day == HIGH_EXTERNAL_INFECTION]
-)
-write_title(paste0(
-    "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
-    "Effect of sx_behav_effect (and clinicians_meet_each_other) ",
-    "with external infection at 0%"), subtitle = TRUE)
-write_glm_and_anova(
-    n_clinicians_infected ~
-        clinicians_meet_each_other *
-        sx_behav_effect,
-    data = e1totals[p_external_infection_per_day == 0]
-)
-write_title(
-    paste0(
-        "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
-        "Effect of sx_behav_effect (and clinicians_meet_each_other) ",
-        "with external infection at ", 100 * HIGH_EXTERNAL_INFECTION, "%"
-    ), subtitle = TRUE)
-write_glm_and_anova(
-    n_clinicians_infected ~
-        clinicians_meet_each_other *
-        sx_behav_effect,
-    data = e1totals[p_external_infection_per_day == HIGH_EXTERNAL_INFECTION]
-)
+#write_title(paste0(
+#    "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
+#    "Effect of sx_behav_effect (and appointment_type) ",
+#    "with external infection at 0%"), subtitle = TRUE)
+#write_glm_and_anova(
+#    n_clinicians_infected ~
+#        appointment_type *
+#        sx_behav_effect,
+#    data = e1totals[p_external_infection_per_day == 0]
+#)
+#write_title(
+#    paste0(
+#        "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
+#        "Effect of sx_behav_effect (and appointment_type) ",
+#        "with external infection at ", 100 * HIGH_EXTERNAL_INFECTION, "%"
+#    ), subtitle = TRUE)
+#write_glm_and_anova(
+#    n_clinicians_infected ~
+#        appointment_type *
+#        sx_behav_effect,
+#    data = e1totals[EX == HIGH_EXTERNAL_INFECTION]
+#)
+#write_title(paste0(
+#    "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
+#    "Effect of sx_behav_effect (and clinicians_meet_each_other) ",
+#    "with external infection at 0%"), subtitle = TRUE)
+#write_glm_and_anova(
+#    n_clinicians_infected ~
+#        clinicians_meet_each_other *
+#        sx_behav_effect,
+#    data = e1totals[EX == 0]
+#)
+#write_title(
+#    paste0(
+#        "Exp 1, clinician infection : SIMPLIFIED MODEL: ",
+#        "Effect of sx_behav_effect (and clinicians_meet_each_other) ",
+#        "with external infection at ", 100 * HIGH_EXTERNAL_INFECTION, "%"
+#    ), subtitle = TRUE)
+#write_glm_and_anova(
+#    n_clinicians_infected ~
+#        clinicians_meet_each_other *
+#        sx_behav_effect,
+#    data = e1totals[EX == HIGH_EXTERNAL_INFECTION]
+#)
 
 
 # -------------------------------------------------------------------------
 # Experiment 2
 # -------------------------------------------------------------------------
 
-e2totals[, n_patients_per_household_factor :=
-    as.factor(n_patients_per_household)]
+e2totals[, AT := appointment_type]
+e2totals[, CM := clinicians_meet_each_other]
+e2totals[, NPH := as.factor(n_patients_per_household)]
 
 write_title("Experiment 2")
 write_title("Exp 2: Whole population infection")
 write_glm_and_anova(
-    n_people_infected ~
-        appointment_type *
-        clinicians_meet_each_other *
-        n_patients_per_household_factor,
+    n_people_infected ~ AT * CM * NPH,
     data = e2totals
 )
 write_title("Exp 2: Clinician infection")
 write_glm_and_anova(
-    n_clinicians_infected ~
-        appointment_type *
-        clinicians_meet_each_other *
-        n_patients_per_household_factor,
+    n_clinicians_infected ~ AT * CM * NPH,
     data = e2totals
 )
+
+write_title("Exp 2: Clinician infection: size of the CM effect across NPH",
+            subtitle = TRUE)
+
+cluster1 <- e2totals %>%
+    group_by(AT, CM, NPH) %>%
+    summarise(
+        mean_n_clinicians_infected = mean(n_clinicians_infected)
+    ) %>%
+    as.data.table()
+cluster2 <- cluster1 %>%
+    group_by(AT, CM, NPH) %>%
+    pivot_wider(
+        names_prefix = "clinicians_meet_",
+        names_from = CM,
+        values_from = mean_n_clinicians_infected
+    ) %>%
+    as.data.table()
+cluster2[, no_meet_fraction_of_meet := (
+    clinicians_meet_False / clinicians_meet_True
+)]
+write_output(cluster2)
+cluster3 <- e2totals %>%
+    group_by(CM, NPH) %>%
+    summarise(
+        mean_n_clinicians_infected = mean(n_clinicians_infected)
+    ) %>%
+    pivot_wider(
+        names_prefix = "clinicians_meet_",
+        names_from = CM,
+        values_from = mean_n_clinicians_infected
+    ) %>%
+    mutate(
+        NPH_continuous = as.integer(NPH)
+    ) %>%
+    as.data.table()
+cluster3[, no_meet_fraction_of_meet := (
+    clinicians_meet_False / clinicians_meet_True
+)]
+write_output(cluster3)
+cluster3model <- lm(no_meet_fraction_of_meet ~ NPH_continuous, data = cluster3)
+write_output(cluster3model)
+write_output(anova(cluster3model))
+
+#cluster4 <- e2totals %>%
+#    group_by(CM, NPH) %>%
+#    summarise(
+#        mean_n_people_infected = mean(n_people_infected)
+#    ) %>%
+#    pivot_wider(
+#        names_prefix = "clinicians_meet_",
+#        names_from = CM,
+#        values_from = mean_n_people_infected
+#    ) %>%
+#    mutate(
+#        NPH_continuous = as.integer(NPH)
+#    ) %>%
+#    as.data.table()
+#cluster4[, no_meet_fraction_of_meet := (
+#    clinicians_meet_False / clinicians_meet_True
+#)]
+#cluster4model <- lm(no_meet_fraction_of_meet ~ NPH_continuous, data = cluster4)
+#print(cluster4model)
+#print(anova(cluster4model))
 
 # -------------------------------------------------------------------------
 # Done
@@ -770,6 +870,10 @@ rm(tmp_width)
 # =============================================================================
 # Plotting functions
 # =============================================================================
+
+# -----------------------------------------------------------------------------
+# Experiment 1: by day
+# -----------------------------------------------------------------------------
 
 make_infected_by_day_plot <- function(data, y_varname, errbar_varname,
                                       title, y_axis_title = NULL) {
@@ -798,6 +902,10 @@ make_infected_by_day_plot <- function(data, y_varname, errbar_varname,
             size = LABEL_SX_BEHAV_EFFECT
         ) +
         COMMON_PLOT_ELEMENTS +
+        scale_colour_manual(values = COLOURS_APPOINTMENT_TYPES) +
+        scale_fill_manual(values = COLOURS_APPOINTMENT_TYPES) +
+        scale_linetype_manual(values = LINETYPES_CLINICIANS_MEET) +
+        scale_size_manual(values = SIZES_SX_BEHAV_EFFECT) +
         scale_y_log10() +
         ylab(y_axis_title) +
         xlab("Day") +
@@ -829,22 +937,79 @@ make_people_by_day_plot <- function(data, title, y_axis_title = NULL) {
 }
 
 
-#make_contacts_by_day_plot <- function(data, title = "#Contacts") {
-#    return(
-#        ggplot(
-#            data,
-#            aes(x = day, y = mean_cum_n_contacts, group = group,
-#                colour = appointment_type,
-#                linetype = clinicians_meet_each_other,
-#                size = sx_behav_effect)
-#        ) +
-#        geom_line() +
-#        COMMON_PLOT_ELEMENTS +
-#        theme(legend.position = "none") +
-#        ggtitle(title)
-#    )
-#}
+# -----------------------------------------------------------------------------
+# Experiment 1: just the totals
+# -----------------------------------------------------------------------------
 
+make_exp1_plot <- function(data, y_varname, errbar_varname,
+                           title, y_axis_title = NULL) {
+    dodge_value <- 0.5
+    errbar_width <- 1
+    point_size <- 2
+    yval <- data[[y_varname]]
+    errbarval <- data[[errbar_varname]]
+    p <- (
+        ggplot(data, aes(x = appointment_type, group = cm_sx_group)) +
+        geom_errorbar(
+            aes(
+                ymin = yval - errbarval,
+                ymax = yval + errbarval
+            ),
+            width = errbar_width,
+            position = position_dodge(width = dodge_value)
+        ) +
+        geom_point(
+            aes_string(
+                y = y_varname,
+                shape = "clinicians_meet_each_other",
+                fill = "sx_behav_effect_labelled"
+            ),
+            size = point_size,
+            position = position_dodge(width = dodge_value)
+        ) +
+        labs(
+            shape = LABEL_CLINICIANS_MEET,
+            fill = LABEL_SX_BEHAV_EFFECT
+        ) +
+        guides(fill = guide_legend(override.aes = list(shape = 21))) +
+        # ... or the default shape isn't fillable so doesn't show fill
+        COMMON_PLOT_ELEMENTS +
+        scale_shape_manual(values = SHAPES_CLINICIANS_MEET) +
+        scale_fill_manual(values = COLOURS_SX_BEHAV_EFFECT) +
+        scale_y_log10() +
+        xlab(LABEL_APPOINTMENT_TYPE) +
+        ylab(y_axis_title) +
+        ggtitle(title)
+    )
+    return(p)
+}
+
+
+make_clinician_exp1_plot <- function(data, title, y_axis_title = NULL) {
+    return(make_exp1_plot(
+        data = data,
+        y_varname = "mean_n_clinicians_infected",
+        errbar_varname = "errbar_n_clinicians_infected",
+        title = title,
+        y_axis_title = y_axis_title
+    ))
+}
+
+
+make_people_exp1_plot <- function(data, title, y_axis_title = NULL) {
+    return(make_exp1_plot(
+        data = data,
+        y_varname = "mean_n_people_infected",
+        errbar_varname = "errbar_n_people_infected",
+        title = title,
+        y_axis_title = y_axis_title
+    ))
+}
+
+
+# -----------------------------------------------------------------------------
+# Experiment 2: by clustering
+# -----------------------------------------------------------------------------
 
 make_exp2_plot <- function(data, y_varname, errbar_varname,
                            title, y_axis_title = NULL) {
@@ -864,14 +1029,24 @@ make_exp2_plot <- function(data, y_varname, errbar_varname,
         geom_line(aes_string(
             y = y_varname,
             colour = "appointment_type",
-            linetype = "clinicians_meet_each_other"
+            linetype = "appointment_type"
+        )) +
+        geom_point(aes_string(
+            y = y_varname,
+            shape = "clinicians_meet_each_other",
+            fill = "appointment_type"
         )) +
         labs(
             colour = LABEL_APPOINTMENT_TYPE,
-            linetype = LABEL_CLINICIANS_MEET
+            fill = LABEL_APPOINTMENT_TYPE,
+            linetype = LABEL_APPOINTMENT_TYPE,
+            shape = LABEL_CLINICIANS_MEET
         ) +
-        geom_point(aes_string(y = y_varname)) +
         COMMON_PLOT_ELEMENTS +
+        scale_colour_manual(values = COLOURS_APPOINTMENT_TYPES) +
+        scale_fill_manual(values = COLOURS_APPOINTMENT_TYPES) +
+        scale_linetype_manual(values = LINETYPES_APPOINTMENT_TYPES) +
+        scale_shape_manual(values = SHAPES_CLINICIANS_MEET) +
         scale_x_continuous(
             breaks = xval,
             minor_breaks = NULL,
@@ -917,11 +1092,18 @@ cat("Making figures...\n")
 # Choose error bars:
 errbar_func <- miscstat$half_confidence_interval_t  # +/- 0.5 * 95% CI, i.e. 95% CI shown
 
+make_infection_group_text <- function(baseline, external) {
+    # Must match LEVELS_INFECTION, which sorts out the ordering.
+    paste0("Baseline ", baseline * 100, "%,\n",
+           "external ", external * 100, "%")
+}
+
+
 # -----------------------------------------------------------------------------
 # Figure 2: Experiment 1
 # -----------------------------------------------------------------------------
 
-plotdata2 <- e1daily %>%
+plotdata2_v1 <- e1daily %>%
     group_by(
         appointment_type,
         clinicians_meet_each_other,
@@ -940,23 +1122,20 @@ plotdata2 <- e1daily %>%
     mutate(
         p_baseline_infected_numeric := as.numeric(as.character(p_baseline_infected)),
         p_external_infection_per_day_numeric := as.numeric(as.character(p_external_infection_per_day)),
-        infection_group := factor(
-            paste0("Baseline ", p_baseline_infected_numeric * 100, "%, ",
-                   "external ", p_external_infection_per_day_numeric * 100, "%"),
-            levels = c(
-                "Baseline 1%, external 0%",
-                "Baseline 5%, external 0%",
-                "Baseline 1%, external 2%",
-                "Baseline 5%, external 2%"
-            )
-        )
+        infection_group_text := make_infection_group_text(
+            p_baseline_infected_numeric, p_external_infection_per_day_numeric)
     ) %>%
     as.data.table()
 # Do the following in a separate step, or you get the warning:
 # Error in mutate_impl(.data, dots, caller_env()) :
 #   (converted from warning) Unequal factor levels: coercing to character
-plotdata2 <- plotdata2 %>%
+# ... because the processing occurs groupwise, so each "factor" is created with
+# only a subset of levels. It works in the next step because we're back to
+# processing everything as a whole.
+plotdata2_v1 <- plotdata2_v1 %>%
     mutate(
+        infection_group := factor(infection_group_text,
+                                  levels = LEVELS_INFECTION),
         infection_sxbehav_group := factor(
             paste0(as.character(infection_group), "\n",
                    LABEL_SX_BEHAV_EFFECT, " ", sx_behav_effect)
@@ -964,31 +1143,100 @@ plotdata2 <- plotdata2 %>%
     ) %>%
     as.data.table()
 # More precise names for appointment type, for plotting:
-plotdata2[, appointment_type := factor(appointment_type,
-                                       levels = APPOINTMENT_TYPE_LEVELS,
-                                       labels = APPOINTMENT_TYPE_LABELS)]
+plotdata2_v1[, appointment_type := factor(appointment_type,
+                                          levels = APPOINTMENT_TYPE_LEVELS,
+                                          labels = APPOINTMENT_TYPE_LABELS_LONG)]
 
-f2p1 <- (
-    make_people_by_day_plot(plotdata2, "A. All people",
-                            y_axis_title = "Cumulative #people infected") +
+f2p1_v1 <- (
+    make_people_by_day_plot(plotdata2_v1, "A. All people",
+                            y_axis_title = "Total #people infected") +
     facet_grid(. ~ infection_sxbehav_group)
 )
-f2p2 <- (
-    make_clinician_by_day_plot(plotdata2, "B. Clinicians",
-                               y_axis_title = "Cumulative #clinicians infected") +
+f2p2_v1 <- (
+    make_clinician_by_day_plot(plotdata2_v1, "B. Clinicians",
+                               y_axis_title = "Total #clinicians infected") +
     facet_grid(. ~ infection_sxbehav_group)
 )
-
-fig2 <- (
+fig2_v1 <- (
     (
-        f2p1 /
-        f2p2 +
+        f2p1_v1 /
+        f2p2_v1 +
         plot_layout(heights = c(6, 12))
     ) +
     plot_layout(guides = "collect") &
     theme(legend.position = "bottom")
 )
-ggsave(FIGURE_2_FILENAME, fig2, width = 40, height = 40, units = "cm")
+# ggsave(FIGURE_2_FILENAME, fig2_v1, width = 40, height = 40, units = "cm")
+
+
+plotdata2_v2 <- e1totals %>%
+    group_by(
+        appointment_type,
+        clinicians_meet_each_other,
+        sx_behav_effect,
+        p_baseline_infected,
+        p_external_infection_per_day,
+        group
+    ) %>%
+    summarise(
+        mean_n_clinicians_infected = mean(n_clinicians_infected),
+        errbar_n_clinicians_infected = errbar_func(n_clinicians_infected),
+        mean_n_people_infected = mean(n_people_infected),
+        errbar_n_people_infected = errbar_func(n_people_infected)
+    ) %>%
+    mutate(
+        p_baseline_infected_numeric := as.numeric(as.character(p_baseline_infected)),
+        p_external_infection_per_day_numeric := as.numeric(as.character(p_external_infection_per_day)),
+        infection_group_text := make_infection_group_text(
+            p_baseline_infected_numeric, p_external_infection_per_day_numeric)
+    ) %>%
+    as.data.table()
+plotdata2_v2 <- plotdata2_v2 %>%
+    mutate(
+        infection_group = factor(infection_group_text,
+                                 levels = LEVELS_INFECTION),
+        infection_sxbehav_group = factor(
+            paste0(as.character(infection_group), "\n",
+                   LABEL_SX_BEHAV_EFFECT, " ", sx_behav_effect)
+        ),
+        sx_behav_effect_labelled = factor(
+            sx_behav_effect,
+            levels = c(0.1, 1),
+            labels = c("Present (0.1)", "Absent (1)")
+        ),
+        cm_sx_group = factor(
+            #paste0(as.character(clinicians_meet_each_other), "_",
+            #       as.character(sx_behav_effect))
+            paste0(as.character(sx_behav_effect), "_",
+                   as.character(clinicians_meet_each_other))
+        )
+    ) %>%
+    as.data.table()
+# More precise names for appointment type, for plotting:
+plotdata2_v2[, appointment_type := factor(appointment_type,
+                                          levels = APPOINTMENT_TYPE_LEVELS,
+                                          labels = APPOINTMENT_TYPE_LABELS_SHORT)]
+
+f2p1_v2 <- (
+    make_people_exp1_plot(plotdata2_v2, "A. All people",
+                          y_axis_title = "Cumulative #people infected") +
+    facet_grid(. ~ infection_group)
+)
+f2p2_v2 <- (
+    make_clinician_exp1_plot(plotdata2_v2, "B. Clinicians",
+                             y_axis_title = "Cumulative #clinicians infected") +
+    facet_grid(. ~ infection_group)
+)
+fig2_v2 <- (
+    (
+        f2p1_v2 /
+        f2p2_v2 +
+        plot_layout(heights = c(6, 12))
+    ) +
+    plot_layout(guides = "collect") &
+    theme(legend.position = "bottom")
+)
+ggsave(FIGURE_2_FILENAME, fig2_v2, width = 25, height = 25, units = "cm")
 
 
 # -----------------------------------------------------------------------------
@@ -1016,7 +1264,7 @@ plotdata3 <- e2totals %>%
     as.data.table()
 plotdata3[, appointment_type := factor(appointment_type,
                                        levels = APPOINTMENT_TYPE_LEVELS,
-                                       labels = APPOINTMENT_TYPE_LABELS)]
+                                       labels = APPOINTMENT_TYPE_LABELS_LONG)]
 
 f3p1 <- (
     make_people_exp2_plot(plotdata3, "A. All people",
@@ -1207,7 +1455,7 @@ seir_specimen_plot <- (
     geom_line() +
     scale_colour_manual(values = SEIRC_COLOURS) +
     # scale_shape_manual() +
-    CORE_PLOT_ELEMENTS
+    COMMON_PLOT_ELEMENTS
 )
 # print(seir_specimen_plot)
 
@@ -1220,10 +1468,11 @@ fig4 <- (
     scale_y_log10() +
     scale_colour_manual(values = c("blue", "red")) +
     labs(colour = "Initial proportion exposed") +
-    xlab("Transmission rate, β") +
+    xlab(expression(bold("Transmission rate" ~ beta))) +
+    # ... the axis.title.x setting for bold doesn't work with expression()
     ylab("Cumulative proportion infected") +
     ggtitle("Deterministic SEIR model") +
-    CORE_PLOT_ELEMENTS
+    COMMON_PLOT_ELEMENTS
 )
 ggsave(FIGURE_4_FILENAME, fig4, width = 15, height = 15, units = "cm")
 
