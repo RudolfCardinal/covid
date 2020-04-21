@@ -167,15 +167,20 @@ APPOINTMENT_TYPE_LABELS_LONG <- c("Remote visit (RV)",
                                   "Patient only (PO)",
                                   "Family contact (FC)")
 APPOINTMENT_TYPE_LABELS_SHORT <- c("RV", "PO", "FC")
+APPOINTMENT_TYPE_LABEL_VALUES <- c(
+    # From factor (e.g. legend) to X axis labels.
+    "Remote visit (RV)" = "RV",
+    "Patient only (PO)" = "PO",
+    "Family contact (FC)" = "FC"
+)
 COLOURS_APPOINTMENT_TYPES <- c("black", "blue", "red")
-SHAPES_APPOINTMENT_TYPES <- c(25, 23, 24)
 LINETYPES_APPOINTMENT_TYPES <- c("dotted", "dashed", "solid")
 
 LINETYPES_CLINICIANS_MEET <- c("dashed", "solid")
 SHAPES_CLINICIANS_MEET <- c(25, 24)  # down arrow false, up arrow true
 
 SIZES_SX_BEHAV_EFFECT <- c(0.75, 1.5)
-COLOURS_SX_BEHAV_EFFECT <- c("black", "white")  # present (0.1), absent (1)
+COLOURS_SX_BEHAV_EFFECT <- c("black", alpha("white", 1))  # present (0.1), absent (1)
 BOOLEAN_LEVELS <- c("False", "True")
 
 LEVELS_INFECTION <- c(
@@ -191,9 +196,13 @@ LEVELS_INFECTION <- c(
 
 # HIGH_EXTERNAL_INFECTION <- 0.02
 
-LABEL_SX_BEHAV_EFFECT <- "Sx behav. effect"
+LABEL_SX_BEHAV_EFFECT <- "Behav. Sx effect"
 LABEL_CLINICIANS_MEET <- "Clinicians meet each other"
+# ... NB, curiously, shortening that to "Clinicians meet" changes the order
+#     of the factors in the legend.
 LABEL_APPOINTMENT_TYPE <- "Appointment type"
+
+LABEL_INITIAL_EXPOSED <- "Initial proportion exposed"
 
 COMMON_PLOT_ELEMENTS <- list(
     theme_bw(),
@@ -203,6 +212,7 @@ COMMON_PLOT_ELEMENTS <- list(
         axis.title.x = element_text(face = "bold")
     )
 )
+NO_LEGEND <- theme(legend.position = "none")
 
 OUTPUT_COLWIDTH <- 120
 
@@ -953,7 +963,8 @@ make_exp1_plot <- function(data, y_varname, errbar_varname,
         geom_errorbar(
             aes(
                 ymin = yval - errbarval,
-                ymax = yval + errbarval
+                ymax = yval + errbarval,
+                colour = appointment_type
             ),
             width = errbar_width,
             position = position_dodge(width = dodge_value)
@@ -962,12 +973,14 @@ make_exp1_plot <- function(data, y_varname, errbar_varname,
             aes_string(
                 y = y_varname,
                 shape = "clinicians_meet_each_other",
+                colour = "appointment_type",
                 fill = "sx_behav_effect_labelled"
             ),
             size = point_size,
             position = position_dodge(width = dodge_value)
         ) +
         labs(
+            colour = LABEL_APPOINTMENT_TYPE,
             shape = LABEL_CLINICIANS_MEET,
             fill = LABEL_SX_BEHAV_EFFECT
         ) +
@@ -976,6 +989,7 @@ make_exp1_plot <- function(data, y_varname, errbar_varname,
         COMMON_PLOT_ELEMENTS +
         scale_shape_manual(values = SHAPES_CLINICIANS_MEET) +
         scale_fill_manual(values = COLOURS_SX_BEHAV_EFFECT) +
+        scale_x_discrete(labels = APPOINTMENT_TYPE_LABEL_VALUES) +
         scale_y_log10() +
         xlab(LABEL_APPOINTMENT_TYPE) +
         ylab(y_axis_title) +
@@ -1215,28 +1229,28 @@ plotdata2_v2 <- plotdata2_v2 %>%
 # More precise names for appointment type, for plotting:
 plotdata2_v2[, appointment_type := factor(appointment_type,
                                           levels = APPOINTMENT_TYPE_LEVELS,
-                                          labels = APPOINTMENT_TYPE_LABELS_SHORT)]
+                                          labels = APPOINTMENT_TYPE_LABELS_LONG)]
 
 f2p1_v2 <- (
     make_people_exp1_plot(plotdata2_v2, "A. All people",
-                          y_axis_title = "Cumulative #people infected") +
+                          y_axis_title = "Total #people infected") +
     facet_grid(. ~ infection_group)
 )
 f2p2_v2 <- (
     make_clinician_exp1_plot(plotdata2_v2, "B. Clinicians",
-                             y_axis_title = "Cumulative #clinicians infected") +
+                             y_axis_title = "Total #clinicians infected") +
     facet_grid(. ~ infection_group)
 )
-fig2_v2 <- (
-    (
-        f2p1_v2 /
-        f2p2_v2 +
-        plot_layout(heights = c(6, 12))
-    ) +
-    plot_layout(guides = "collect") &
-    theme(legend.position = "bottom")
-)
-ggsave(FIGURE_2_FILENAME, fig2_v2, width = 25, height = 25, units = "cm")
+#fig2_v2 <- (
+#    (
+#        f2p1_v2 /
+#        f2p2_v2 +
+#        plot_layout(heights = c(6, 12))
+#    ) +
+#    plot_layout(guides = "collect") &
+#    theme(legend.position = "bottom")
+#)
+#ggsave(FIGURE_2_FILENAME, fig2_v2, width = 25, height = 25, units = "cm")
 
 
 # -----------------------------------------------------------------------------
@@ -1267,11 +1281,11 @@ plotdata3[, appointment_type := factor(appointment_type,
                                        labels = APPOINTMENT_TYPE_LABELS_LONG)]
 
 f3p1 <- (
-    make_people_exp2_plot(plotdata3, "A. All people",
+    make_people_exp2_plot(plotdata3, "C. All people",
                           y_axis_title = "Total #people infected")
 )
 f3p2 <- (
-    make_clinician_exp2_plot(plotdata3, "B. Clinicians",
+    make_clinician_exp2_plot(plotdata3, "D. Clinicians",
                              y_axis_title = "Total #clinicians infected")
 )
 
@@ -1283,7 +1297,7 @@ fig3 <- (
     plot_layout(guides = "collect") &
     theme(legend.position = "bottom")
 )
-ggsave(FIGURE_3_FILENAME, fig3, width = 20, height = 10, units = "cm")
+# ggsave(FIGURE_3_FILENAME, fig3, width = 20, height = 10, units = "cm")
 
 
 # =============================================================================
@@ -1462,19 +1476,38 @@ seir_specimen_plot <- (
 
 fig4 <- (
     ggplot(seirdata, aes(x = transmission_rate, y = cumulative_infected,
-                         colour = initial_proportion_exposed_factor)) +
+                         linetype = initial_proportion_exposed_factor)) +
     geom_line() +
     # geom_point() +
     scale_y_log10() +
-    scale_colour_manual(values = c("blue", "red")) +
-    labs(colour = "Initial proportion exposed") +
+    # scale_colour_manual(values = c("blue", "red")) +
+    scale_linetype_manual(values = c("solid", "dotted")) +
+    labs(linetype = LABEL_INITIAL_EXPOSED) +
     xlab(expression(bold("Transmission rate" ~ beta))) +
     # ... the axis.title.x setting for bold doesn't work with expression()
-    ylab("Cumulative proportion infected") +
-    ggtitle("Deterministic SEIR model") +
+    ylab("Proportion infected") +
+    ggtitle("E. Deterministic SEIR model") +
     COMMON_PLOT_ELEMENTS
 )
-ggsave(FIGURE_4_FILENAME, fig4, width = 15, height = 15, units = "cm")
+# ggsave(FIGURE_4_FILENAME, fig4, width = 15, height = 15, units = "cm")
+
+
+# =============================================================================
+# Composite figure
+# =============================================================================
+
+composite_fig <- (
+    (
+        (f2p1_v2 + NO_LEGEND) /
+        f2p2_v2
+    ) /
+    (
+        (f3p1 + NO_LEGEND) | (f3p2 + NO_LEGEND) | (fig4 + NO_LEGEND)
+    ) +
+    plot_layout(heights = c(5, 10, 6))
+    # & theme(legend.position = "bottom")
+)
+ggsave(FIGURE_2_FILENAME, composite_fig, width = 30, height = 25, units = "cm")
 
 
 # =============================================================================
