@@ -1105,7 +1105,8 @@ class Population(object):
                     if appointment_type == Appointment.HOME_VISIT:
                         household = self.p2h[p]
                         for h in household:
-                            expose_pair(c, h, prop_day_c_f)
+                            if h is not p:  # don't expose to the patient twice
+                                expose_pair(c, h, prop_day_c_f)
             except NoClinicians:
                 log.warning(f"Out of clinicians on day {today}")
         elif appointment_type == Appointment.REMOTE:

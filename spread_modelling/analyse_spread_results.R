@@ -1068,7 +1068,7 @@ make_exp2_plot <- function(data, y_varname, errbar_varname,
         ) +
         scale_y_log10() +
         ylab(y_axis_title) +
-        xlab("#Patients per household") +
+        xlab("Cluster size") +
         ggtitle(title)
     )
     return(p)
