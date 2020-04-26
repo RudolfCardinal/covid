@@ -67,12 +67,13 @@ def launch(job: str) -> None:
     launch_cambridge_hphi(
         jobname=jobname,
         cmd=cmd,
-        memory_mb=48000,
-        qos="day.q",
-        # qos="short.q",
+        memory_mb=4000,  # empirically: about 1.3 Gb
+        # qos="day.q",
+        qos="long.q",
+        # Both day.q and long.q work. There is a CPU limit per QOS,
+        # so by shifting to another QOS, you can get three simultaneously.
         email="rnc1001@cam.ac.uk",
         duration=timedelta(days=1),
-        # duration=timedelta(hours=8),
         cpus_per_task=24,  # 48 works but competition++; 24 on instantly
         partition="wbic-cs"
     )
