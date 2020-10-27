@@ -159,7 +159,7 @@ FIGURE_4_FILENAME <- file.path(OUTPUT_DIR, "figure_4.pdf")
 # Other constants
 # =============================================================================
 
-RUN_GLMS <- TRUE  # can be slow
+RUN_GLMS <- FALSE  # can be slow
 
 # Ensure correct order of factor levels
 APPOINTMENT_TYPE_LEVELS <- c("remote", "clinic", "home_visit")
@@ -173,7 +173,8 @@ APPOINTMENT_TYPE_LABEL_VALUES <- c(
     "Patient only (PO)" = "PO",
     "Family contact (FC)" = "FC"
 )
-COLOURS_APPOINTMENT_TYPES <- c("black", "blue", "red")
+# COLOURS_APPOINTMENT_TYPES <- c("black", "blue", "red")
+COLOURS_APPOINTMENT_TYPES <- c("darkgreen", "blue", "red")
 LINETYPES_APPOINTMENT_TYPES <- c("dotted", "dashed", "solid")
 
 LINETYPES_CLINICIANS_MEET <- c("dashed", "solid")
@@ -987,6 +988,7 @@ make_exp1_plot <- function(data, y_varname, errbar_varname,
         guides(fill = guide_legend(override.aes = list(shape = 21))) +
         # ... or the default shape isn't fillable so doesn't show fill
         COMMON_PLOT_ELEMENTS +
+        scale_colour_manual(values = COLOURS_APPOINTMENT_TYPES) +
         scale_shape_manual(values = SHAPES_CLINICIANS_MEET) +
         scale_fill_manual(values = COLOURS_SX_BEHAV_EFFECT) +
         scale_x_discrete(labels = APPOINTMENT_TYPE_LABEL_VALUES) +
